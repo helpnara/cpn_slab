@@ -289,8 +289,25 @@
   }
   .q-chip .chip-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 
+  /* ── ANALYTICS (심층 분석) ── */
+  .analytics { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin-bottom: 32px; }
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .chart-card .chart-title { font-size: 12px; font-weight: 700; color: var(--accent2); margin-bottom: 14px; letter-spacing: .5px; }
+  .chart-empty { color: var(--muted); font-size: 11px; }
+  .spark { width: 100%; height: 90px; display: block; }
+  .bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 11px; }
+  .bar-row .bar-label { width: 74px; color: var(--muted); flex-shrink: 0; }
+  .bar-track { flex: 1; height: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+  .bar-fill { display: block; height: 100%; border-radius: 7px; transition: width .3s ease, background .3s; }
+  .bar-val { width: 54px; text-align: right; color: var(--text); font-family: ui-monospace, 'Courier New', monospace; flex-shrink: 0; }
+
   /* ── INSIGHTS ── */
-  .insights { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  .insights { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 16px; margin-bottom: 32px; }
   .insight-card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -553,6 +570,28 @@
       <div class="label">평균 리드타임</div>
       <div><span class="value" id="stat-avg">—</span><span class="unit">스텝</span></div>
       <div class="delta" id="stat-avg-d"></div>
+    </div>
+    <div class="insight-card">
+      <div class="label">처리량</div>
+      <div><span class="value" id="stat-tp">—</span><span class="unit">개 / 60스텝</span></div>
+      <div class="delta" id="stat-tp-d" style="font-size:11px;color:var(--muted);margin-top:4px">최근 30스텝 기준</div>
+    </div>
+  </div>
+
+  <!-- ANALYTICS / 심층 분석 -->
+  <div class="section-label" style="margin-top:32px">심층 분석</div>
+  <div class="analytics">
+    <div class="chart-card">
+      <div class="chart-title">📈 WIP 추이 (최근 120스텝)</div>
+      <div id="chart-wip"><div class="chart-empty">시작하면 추이가 표시됩니다</div></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">🏭 Place별 점유 / 용량</div>
+      <div id="chart-occ"><div class="chart-empty">—</div></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">⏱ 강종별 평균 리드타임 (스텝)</div>
+      <div id="chart-lead"><div class="chart-empty">완료 시 집계됩니다</div></div>
     </div>
   </div>
 
@@ -843,6 +882,7 @@ function step() {
   renderSvgTokens();
   renderTokenList();
   updateStats();
+  updateInsights();
 }
 
 // 시계열 샘플 적재(최근 120스텝)
@@ -884,9 +924,77 @@ function resetSim() {
   document.getElementById('btn-start').disabled = false;
   document.getElementById('log-area').innerHTML = '<div class="log-line"><span class="log-time">──</span><span class="log-event" style="color:var(--muted)">초기화 완료 — 다시 시작하세요</span></div>';
   tokensSvg.innerHTML = '';
+  document.getElementById('chart-wip').innerHTML = '<div class="chart-empty">시작하면 추이가 표시됩니다</div>';
   renderTokenList();
   renderQueue();
   updateStats();
+  updateInsights();
+}
+
+// ══════════════════════════════════════════════════════════════
+//  INSIGHTS (심층 분석) — 인라인 SVG/CSS 차트 (의존성 0)
+// ══════════════════════════════════════════════════════════════
+function updateInsights() {
+  // 1) WIP 추이 스파크라인
+  const spark = document.getElementById('chart-wip');
+  if (spark && histSamples.length >= 2) {
+    const W = 300, H = 90, pad = 6, n = histSamples.length;
+    const maxWip = Math.max(CONFIG.maxWip, ...histSamples.map(h => h.wip), 1);
+    const X = i => pad + (W - 2 * pad) * i / (n - 1);
+    const Y = v => H - pad - (H - 2 * pad) * v / maxWip;
+    const pts = histSamples.map((h, i) => `${X(i).toFixed(1)},${Y(h.wip).toFixed(1)}`).join(' ');
+    const area = `${pad},${H - pad} ${pts} ${X(n - 1).toFixed(1)},${H - pad}`;
+    spark.innerHTML = `<svg viewBox="0 0 ${W} ${H}" class="spark" preserveAspectRatio="none">
+      <polygon points="${area}" fill="var(--accent)" opacity="0.12"/>
+      <polyline points="${pts}" fill="none" stroke="var(--accent2)" stroke-width="1.5"
+                vector-effect="non-scaling-stroke"/></svg>`;
+  }
+
+  // 2) Place별 점유 / 용량
+  const occEl = document.getElementById('chart-occ');
+  if (occEl) {
+    occEl.innerHTML = STAGES.map(st => {
+      const occ = occupancy(st.id);
+      const inf = st.cap === Infinity;
+      const capLabel = inf ? '∞' : st.cap;
+      const pct = inf ? (occ ? 30 : 0) : Math.min(100, occ / st.cap * 100);
+      const over = !inf && occ >= st.cap && occ > 0;
+      const color = over ? 'var(--hot)' : 'var(--steel)';
+      return `<div class="bar-row"><span class="bar-label">${st.label}</span>
+        <span class="bar-track"><span class="bar-fill" style="width:${pct}%;background:${color}"></span></span>
+        <span class="bar-val">${occ}/${capLabel}</span></div>`;
+    }).join('');
+  }
+
+  // 3) 강종별 평균 리드타임
+  const leadEl = document.getElementById('chart-lead');
+  if (leadEl) {
+    const rows = GRADES.map(g => {
+      const arr = leadByGrade[g.id] || [];
+      const avg = arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+      return { g, avg, n: arr.length };
+    });
+    const maxAvg = Math.max(1, ...rows.map(r => r.avg));
+    leadEl.innerHTML = rows.map(r => {
+      const pct = r.avg / maxAvg * 100;
+      return `<div class="bar-row"><span class="bar-label" style="color:${r.g.color}">${r.g.id}</span>
+        <span class="bar-track"><span class="bar-fill" style="width:${pct}%;background:${r.g.color}"></span></span>
+        <span class="bar-val">${r.n ? r.avg.toFixed(1) : '—'}</span></div>`;
+    }).join('');
+  }
+
+  // 처리량 KPI — 최근 30스텝 완료 속도(개/60스텝)
+  const tpEl = document.getElementById('stat-tp');
+  if (tpEl) {
+    if (histSamples.length >= 2) {
+      const win = histSamples.slice(-30);
+      const dt = win[win.length - 1].t - win[0].t;
+      const dd = win[win.length - 1].done - win[0].done;
+      tpEl.textContent = dt > 0 ? (dd / dt * 60).toFixed(1) : '0.0';
+    } else {
+      tpEl.textContent = '—';
+    }
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -942,6 +1050,7 @@ function bindInputs() {
   bindRange('p-bn', 'bottleneckThreshold', 'p-bn-v', v => parseInt(v));
 
   renderQueue();
+  updateInsights();
 }
 
 document.addEventListener('DOMContentLoaded', bindInputs);
