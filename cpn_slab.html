@@ -447,7 +447,7 @@
     <button class="btn" id="btn-start" onclick="startSim()">▶ 시뮬레이션 시작</button>
     <button class="btn btn-ghost" onclick="resetSim()">↺ 초기화</button>
     <span class="speed-label">속도</span>
-    <select class="speed-select" id="speed-sel">
+    <select class="speed-select" id="speed-sel" onchange="CONFIG.speedMs = parseInt(this.value)">
       <option value="1500">보통</option>
       <option value="800">빠름</option>
       <option value="400">매우 빠름</option>
@@ -490,8 +490,8 @@
       <div class="delta" id="stat-bn-d" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
     </div>
     <div class="insight-card">
-      <div class="label">평균 처리 시간</div>
-      <div><span class="value" id="stat-avg">—</span><span class="unit">초</span></div>
+      <div class="label">평균 리드타임</div>
+      <div><span class="value" id="stat-avg">—</span><span class="unit">스텝</span></div>
       <div class="delta" id="stat-avg-d"></div>
     </div>
   </div>
@@ -499,22 +499,37 @@
 </main>
 
 <script>
-// ── DATA ──
+// ══════════════════════════════════════════════════════════════
+//  CONFIG — 매직넘버 중앙화 (입력부에서 실시간 변경)
+// ══════════════════════════════════════════════════════════════
+const CONFIG = {
+  maxWip: 6,               // 공정 내 최대 동시 슬래브 수
+  autoArrival: true,       // 자동 투입 on/off
+  arrivalProb: 0.45,       // 자동 투입 시 스텝당 확률
+  speedMs: 1500,           // 스텝 간격(ms)
+  bottleneckThreshold: 2,  // 점유 경보 임계
+  thickMin: 200,
+  thickMax: 300,
+};
+
+// ── DATA: Color set (강종) ──
 const GRADES = [
-  { id:'SUS304', color:'#c084fc', route:'LF',   label:'스테인리스' },
+  { id:'SUS304', color:'#c084fc', route:'LF',    label:'스테인리스' },
   { id:'SS400',  color:'#34d399', route:'DIRECT',label:'일반구조용' },
   { id:'API5L',  color:'#f59e0b', route:'RH',    label:'파이프라인강' },
 ];
 
+// ── DATA: Place (공정 위치) ──
+//  proc = 처리 체류 스텝 수, cap = 동시 수용 용량
 const STAGES = [
-  { id:'ld',      label:'전로 OUT',   cx:55,  cy:150 },
-  { id:'lf_wait', label:'정련 대기',   cx:218, cy:150 },
-  { id:'lf',      label:'LF 정련',    cx:310, cy:70  },
-  { id:'rh',      label:'RH 탈가스',  cx:310, cy:230 },
-  { id:'tundish', label:'턴디시',     cx:405, cy:150 },
-  { id:'mold',    label:'몰드',       cx:580, cy:150 },
-  { id:'cooling', label:'2차 냉각대', cx:745, cy:150 },
-  { id:'yard',    label:'슬래브 야드', cx:910, cy:150 },
+  { id:'ld',      label:'전로 OUT',   cx:55,  cy:150, proc:1, cap:Infinity },
+  { id:'lf_wait', label:'정련 대기',   cx:218, cy:150, proc:1, cap:3 },
+  { id:'lf',      label:'LF 정련',    cx:310, cy:70 , proc:3, cap:1 },
+  { id:'rh',      label:'RH 탈가스',  cx:310, cy:230, proc:4, cap:1 },
+  { id:'tundish', label:'턴디시',     cx:405, cy:150, proc:1, cap:1 },
+  { id:'mold',    label:'몰드',       cx:580, cy:150, proc:2, cap:1 },
+  { id:'cooling', label:'2차 냉각대', cx:745, cy:150, proc:3, cap:4 },
+  { id:'yard',    label:'슬래브 야드', cx:910, cy:150, proc:1, cap:Infinity },
 ];
 
 function stagesFor(route) {
@@ -524,16 +539,22 @@ function stagesFor(route) {
 }
 
 function stagePos(sid) { return STAGES.find(s=>s.id===sid); }
+function gradeOf(g)    { return GRADES.find(x=>x.id===g); }
+function capOf(sid)    { const s = stagePos(sid); return s ? s.cap : Infinity; }
 
 // ── STATE ──
 let slabs = [];
 let done = 0;
 let clockTimer = null;
-let elapsed = 0;
+let elapsed = 0;            // 실경과 시간(초, 표시용)
+let simTime = 0;           // 시뮬레이션 스텝(리드타임 기준 시간축)
 let heatSeq = 1;
-let completionTimes = [];
-
-function gradeOf(g) { return GRADES.find(x=>x.id===g); }
+let idSeq = 1;
+let completionTimes = [];  // 리드타임(스텝)
+let dwellByStage = {};     // { stageId: [dwell...] }
+let leadByGrade = {};      // { gradeId: [lead...] }
+let manualQueue = [];      // 수동 투입 대기열
+let histSamples = [];          // 시계열 샘플 { t, wip, done, occ }
 
 function makeHeat() { return 'H' + String(heatSeq++).padStart(3,'0'); }
 
@@ -544,6 +565,27 @@ function makeTemp(stage) {
   if (stage === 'mold') return 1520;
   if (stage === 'cooling') return 1100 + Math.floor(Math.random()*200);
   return 900;
+}
+
+function occupancy(sid) { return slabs.filter(s => s.stages[s.stageIdx] === sid).length; }
+
+// 슬래브(토큰) 생성 — 강종·두께 미지정 시 무작위
+function makeSlab(gradeId, thick) {
+  const g = gradeOf(gradeId) || GRADES[Math.floor(Math.random()*GRADES.length)];
+  const t = thick || (CONFIG.thickMin + Math.floor(Math.random()*(CONFIG.thickMax - CONFIG.thickMin + 1)));
+  return {
+    id: 'slab-' + (idSeq++),
+    heatNo: makeHeat(),
+    grade: g.id,
+    thick: t,
+    route: g.route,
+    stages: stagesFor(g.route),
+    stageIdx: 0,
+    remaining: stagePos('ld').proc,
+    startTime: simTime,
+    enteredTick: simTime,
+    blocked: false,
+  };
 }
 
 // ── CLOCK ──
@@ -595,6 +637,7 @@ function renderSvgTokens() {
       circle.setAttribute('r', 6);
       circle.setAttribute('fill', g.color);
       circle.setAttribute('filter','url(#glow)');
+      if (sl.blocked) { circle.setAttribute('stroke', '#ff3b30'); circle.setAttribute('stroke-width', '2'); }
       circle.style.cursor = 'pointer';
       circle.addEventListener('click', ()=>highlightSlab(sl.id));
       tokensSvg.appendChild(circle);
@@ -620,6 +663,7 @@ function renderTokenList() {
       <span class="token-grade">${sl.grade}</span>
       <span style="color:var(--muted);font-size:10px">${sl.thick}mm</span>
       <span class="temp-badge ${hot?'':'cold'}">${temp}℃</span>
+      ${sl.blocked ? '<span class="temp-badge" style="background:var(--hot)22;color:var(--hot)">병목</span>' : ''}
       <span class="token-loc">${stageName}</span>
     </div>`;
   }).join('');
@@ -636,26 +680,29 @@ function updateStats() {
   document.getElementById('stat-done').textContent = done;
   document.getElementById('stat-wip').textContent = slabs.length;
 
-  // bottleneck: any stage with ≥ 3 tokens?
-  const stageMap = {};
-  slabs.forEach(sl=>{
+  // bottleneck: 블로킹된 슬래브 우선, 없으면 점유 임계 초과 Place
+  const blocked = {}, occ = {};
+  slabs.forEach(sl => {
     const sid = sl.stages[sl.stageIdx];
-    stageMap[sid] = (stageMap[sid]||0)+1;
+    occ[sid] = (occ[sid] || 0) + 1;
+    if (sl.blocked) blocked[sid] = (blocked[sid] || 0) + 1;
   });
-  const hot = Object.entries(stageMap).filter(([,v])=>v>=2);
+  const blockedIds = Object.keys(blocked);
+  const overIds = Object.entries(occ).filter(([,v]) => v >= CONFIG.bottleneckThreshold).map(([k]) => k);
   const bnEl = document.getElementById('stat-bottleneck');
   const bnD  = document.getElementById('stat-bn-d');
-  if (hot.length) {
-    const nm = STAGES.find(s=>s.id===hot[0][0])?.label||hot[0][0];
-    bnEl.textContent='경보';
-    bnEl.style.color='var(--hot)';
-    bnD.textContent = nm + ' 대기 누적';
+  if (blockedIds.length || overIds.length) {
+    const sid = blockedIds[0] || overIds[0];
+    const nm = stagePos(sid)?.label || sid;
+    bnEl.textContent = '경보';
+    bnEl.style.color = 'var(--hot)';
+    bnD.textContent = nm + (blockedIds.length ? ' 블로킹' : ' 대기 누적');
     bnD.style.color = 'var(--hot)';
   } else {
-    bnEl.textContent='정상';
-    bnEl.style.color='var(--cold)';
-    bnD.textContent='전 공정 순조';
-    bnD.style.color='var(--muted)';
+    bnEl.textContent = '정상';
+    bnEl.style.color = 'var(--cold)';
+    bnD.textContent = '전 공정 순조';
+    bnD.style.color = 'var(--muted)';
   }
 
   // avg
@@ -665,68 +712,91 @@ function updateStats() {
   }
 }
 
-// ── SIMULATION TICK (requestAnimationFrame 기반 — iOS Safari 호환) ──
+// ══════════════════════════════════════════════════════════════
+//  SIMULATION ENGINE — 체류시간(proc) + 용량(cap) 기반 결정적 모델
+//  (requestAnimationFrame 기반 틱 — iOS Safari 호환)
+// ══════════════════════════════════════════════════════════════
 let rafId = null;
 let lastTickTime = 0;
 let isRunning = false;
 
-function tick(timestamp) {
-  if (!isRunning) return;
-
-  const speed = parseInt(document.getElementById('speed-sel').value);
-
-  // 지정된 간격(speed ms)마다만 로직 실행
-  if (timestamp - lastTickTime < speed) {
-    rafId = requestAnimationFrame(tick);
+function handleArrivals() {
+  // 수동 대기열 우선 투입
+  if (manualQueue.length && slabs.length < CONFIG.maxWip && occupancy('ld') < capOf('ld')) {
+    const q = manualQueue.shift();
+    const slab = makeSlab(q.grade, q.thick);
+    slabs.push(slab);
+    addLog(`[투입·수동] ${slab.heatNo} ${slab.grade} ${slab.thick}mm → ${STAGES[0].label}`, 'ok');
     return;
   }
-  lastTickTime = timestamp;
-
-  // Inject new slab
-  if (slabs.length < 6 && Math.random() < 0.45) {
-    const g = GRADES[Math.floor(Math.random()*3)];
-    const thick = 200 + Math.floor(Math.random()*101);
-    const slab = {
-      id: 'slab-' + Date.now(),
-      heatNo: makeHeat(),
-      grade: g.id,
-      thick,
-      route: g.route,
-      stages: stagesFor(g.route),
-      stageIdx: 0,
-      startTime: elapsed,
-    };
+  // 자동 투입
+  if (CONFIG.autoArrival && slabs.length < CONFIG.maxWip && Math.random() < CONFIG.arrivalProb) {
+    const slab = makeSlab();
     slabs.push(slab);
-    addLog(`[투입] ${slab.heatNo} ${slab.grade} ${slab.thick}mm → ${STAGES[0].label}`, 'ok');
+    addLog(`[투입·자동] ${slab.heatNo} ${slab.grade} ${slab.thick}mm → ${STAGES[0].label}`, 'ok');
   }
+}
 
-  // Advance each slab
-  slabs.forEach(sl => {
-    if (Math.random() < 0.5) {
-      sl.stageIdx = Math.min(sl.stageIdx + 1, sl.stages.length - 1);
-      const sid = sl.stages[sl.stageIdx];
-      const stageName = STAGES.find(s=>s.id===sid)?.label||sid;
-      addLog(`[이동] ${sl.heatNo} (${sl.grade}) → ${stageName}`);
-      if (sid === 'lf') addLog(`  ↳ Guard: grade=SUS304 → LF 경로`, 'ok');
-      if (sid === 'rh') addLog(`  ↳ Guard: grade=API5L → RH 탈가스`, 'ok');
-      if (sid === 'cooling' && sl.thick < 230) addLog(`  ↳ 경고: 두께 ${sl.thick}mm 주의`, 'warn');
+// 시뮬레이션 1스텝
+function step() {
+  simTime++;
+
+  handleArrivals();
+
+  // 1) 처리 진행 — 각 Place에서 체류시간 감소
+  slabs.forEach(s => { if (s.remaining > 0) s.remaining--; });
+
+  // 2) 이동 — 하류(뒤쪽)부터 처리해 용량을 먼저 비운다
+  const movers = slabs.filter(s => s.remaining <= 0).sort((a, b) => b.stageIdx - a.stageIdx);
+  movers.forEach(s => {
+    if (s.stageIdx >= s.stages.length - 1) return;   // 야드 도착분은 완료 단계에서 처리
+    const curSid  = s.stages[s.stageIdx];
+    const nextSid = s.stages[s.stageIdx + 1];
+    if (occupancy(nextSid) < capOf(nextSid)) {
+      (dwellByStage[curSid] = dwellByStage[curSid] || []).push(simTime - s.enteredTick);
+      s.stageIdx++;
+      s.enteredTick = simTime;
+      s.remaining = stagePos(nextSid).proc;
+      s.blocked = false;
+      addLog(`[이동] ${s.heatNo} (${s.grade}) → ${stagePos(nextSid).label}`);
+      if (nextSid === 'lf') addLog(`  ↳ Guard: grade=SUS304 → LF 경로`, 'ok');
+      if (nextSid === 'rh') addLog(`  ↳ Guard: grade=API5L → RH 탈가스`, 'ok');
+      if (nextSid === 'cooling' && s.thick < 230) addLog(`  ↳ 경고: 두께 ${s.thick}mm 주의`, 'warn');
+    } else {
+      s.blocked = true;   // 다음 Place 만석 → 병목(블로킹)
     }
   });
 
-  // Remove completed
-  const completed = slabs.filter(sl => sl.stageIdx === sl.stages.length - 1 && sl.stages[sl.stageIdx] === 'yard');
-  completed.forEach(sl => {
-    const t = elapsed - sl.startTime;
-    completionTimes.push(t);
-    addLog(`[완료] ${sl.heatNo} 야드 입고 (${t}초)`, 'ok');
+  // 3) 완료 — 야드 도착 + 처리 완료
+  const doneNow = slabs.filter(s => s.stages[s.stageIdx] === 'yard' && s.remaining <= 0);
+  doneNow.forEach(s => {
+    const lead = simTime - s.startTime;
+    completionTimes.push(lead);
+    (leadByGrade[s.grade] = leadByGrade[s.grade] || []).push(lead);
+    addLog(`[완료] ${s.heatNo} 야드 입고 (리드타임 ${lead}스텝)`, 'ok');
     done++;
   });
-  slabs = slabs.filter(sl => !(sl.stageIdx === sl.stages.length - 1 && sl.stages[sl.stageIdx] === 'yard'));
+  slabs = slabs.filter(s => !(s.stages[s.stageIdx] === 'yard' && s.remaining <= 0));
 
+  sampleHistory();
   renderSvgTokens();
   renderTokenList();
   updateStats();
+}
 
+// 시계열 샘플 적재(최근 120스텝)
+function sampleHistory() {
+  const occ = {};
+  STAGES.forEach(st => { occ[st.id] = occupancy(st.id); });
+  histSamples.push({ t: simTime, wip: slabs.length, done, occ });
+  if (histSamples.length > 120) histSamples.shift();
+}
+
+function tick(timestamp) {
+  if (!isRunning) return;
+  if (timestamp - lastTickTime < CONFIG.speedMs) { rafId = requestAnimationFrame(tick); return; }
+  lastTickTime = timestamp;
+  step();
   rafId = requestAnimationFrame(tick);
 }
 
@@ -745,13 +815,14 @@ function resetSim() {
   if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
   clearInterval(clockTimer);
   clockTimer = null;
-  slabs = []; done = 0; elapsed = 0; heatSeq = 1; completionTimes = [];
+  slabs = []; done = 0; elapsed = 0; simTime = 0; heatSeq = 1; idSeq = 1;
+  completionTimes = []; dwellByStage = {}; leadByGrade = {}; manualQueue = []; histSamples = [];
   lastTickTime = 0;
   document.getElementById('clock').textContent = '00:00';
   document.getElementById('btn-start').textContent = '▶ 시뮬레이션 시작';
   document.getElementById('btn-start').disabled = false;
   document.getElementById('log-area').innerHTML = '<div class="log-line"><span class="log-time">──</span><span class="log-event" style="color:var(--muted)">초기화 완료 — 다시 시작하세요</span></div>';
-  tokensSvg.innerHTML='';
+  tokensSvg.innerHTML = '';
   renderTokenList();
   updateStats();
 }
