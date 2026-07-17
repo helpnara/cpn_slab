@@ -3,6 +3,8 @@
 > **Colored Petri Net(CPN) 기반 슬래브 물류 실시간 가시화 프로토타입**
 > 제철소 연주(연속주조) 부문의 슬래브 흐름을 강종별 경로 분기와 함께 시각화·시뮬레이션합니다.
 
+**🔗 라이브 데모**: <https://helpnara.github.io/cpn_slab/> (GitHub Pages · `main` 브랜치 기준)
+
 전로(LD) → 정련(LF / RH) → 연속주조 → 슬래브 야드로 이어지는 공정을,
 Colored Petri Net의 **Place(설비·버퍼) / Transition(공정 이벤트) / Token(슬래브)** 개념으로
 표현한 단일 HTML 데모입니다. 강종(Color)에 따라 정련 경로가 자동으로 분기됩니다.
@@ -65,6 +67,7 @@ iOS Safari에서 로컬 파일로 직접 열어도 동작하도록 설계되어 
 ```
 cpn_slab/
 ├── cpn_slab.html          # 애플리케이션 본체 (HTML + CSS + JS 단일 파일)
+├── index.html             # GitHub Pages 루트 진입점 → cpn_slab.html 리다이렉트
 ├── README.md              # 이 문서
 ├── CLAUDE.md              # AI 보조 작업(Claude Code)용 가이드
 └── docs/
