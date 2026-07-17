@@ -253,6 +253,42 @@
     cursor: pointer;
   }
 
+  /* ── INPUT PANEL (입력부) ── */
+  .io-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 32px; }
+  .io-group {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+  }
+  .io-group-title { font-size: 12px; font-weight: 700; letter-spacing: 1px; color: var(--accent2); margin-bottom: 16px; }
+  .io-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+  .field { display: flex; flex-direction: column; gap: 6px; font-size: 11px; color: var(--muted); }
+  .field span { letter-spacing: .5px; }
+  .io-input {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 12px;
+    min-width: 110px;
+  }
+  .io-input:focus { outline: none; border-color: var(--accent2); }
+  .field-inline { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); margin-bottom: 14px; cursor: pointer; }
+  .field-range { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+  .field-range b { color: var(--accent2); font-family: ui-monospace, 'Courier New', monospace; }
+  .field-range input[type=range] { width: 100%; accent-color: var(--accent); }
+  .io-queue { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; min-height: 26px; }
+  .io-queue-empty { font-size: 11px; color: var(--muted); }
+  .q-chip {
+    display: flex; align-items: center; gap: 6px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 20px; padding: 4px 10px;
+    font-size: 11px; font-family: ui-monospace, 'Courier New', monospace;
+  }
+  .q-chip .chip-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
   /* ── INSIGHTS ── */
   .insights { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
   .insight-card {
@@ -440,6 +476,30 @@
       <!-- temp labels on cooling -->
       <text id="cool-temp" x="745" y="185" text-anchor="middle" fill="#56cfb2" font-size="8" font-family="ui-monospace, Courier New, monospace" opacity="0">●1200℃</text>
     </svg>
+  </div>
+
+  <!-- INPUT / 입력부 -->
+  <div class="section-label">입력부 · 동적 투입 &amp; 파라미터</div>
+  <div class="io-panel">
+    <div class="io-group">
+      <div class="io-group-title">🎯 슬래브 투입</div>
+      <div class="io-row">
+        <label class="field"><span>강종</span><select id="in-grade" class="io-input"></select></label>
+        <label class="field"><span>두께(mm)</span><input id="in-thick" class="io-input" type="number" min="150" max="400" placeholder="랜덤"></label>
+        <label class="field"><span>수량</span><input id="in-qty" class="io-input" type="number" min="1" max="20" value="1"></label>
+        <button class="btn" id="btn-add">＋ 투입 예약</button>
+        <button class="btn btn-ghost" id="btn-clear-q">대기열 비우기</button>
+      </div>
+      <div class="io-queue" id="io-queue"><span class="io-queue-empty">투입 대기열 비어 있음</span></div>
+    </div>
+
+    <div class="io-group">
+      <div class="io-group-title">⚙️ 시뮬레이션 파라미터</div>
+      <label class="field-inline"><input type="checkbox" id="p-auto" checked><span>자동 투입 사용</span></label>
+      <label class="field-range"><span>자동 투입 확률 <b id="p-prob-v">0.45</b></span><input type="range" id="p-prob" min="0" max="1" step="0.05" value="0.45"></label>
+      <label class="field-range"><span>최대 WIP <b id="p-wip-v">6</b></span><input type="range" id="p-wip" min="1" max="12" step="1" value="6"></label>
+      <label class="field-range"><span>병목 경보 임계 <b id="p-bn-v">2</b></span><input type="range" id="p-bn" min="1" max="6" step="1" value="2"></label>
+    </div>
   </div>
 
   <!-- CONTROLS -->
@@ -727,6 +787,7 @@ function handleArrivals() {
     const slab = makeSlab(q.grade, q.thick);
     slabs.push(slab);
     addLog(`[투입·수동] ${slab.heatNo} ${slab.grade} ${slab.thick}mm → ${STAGES[0].label}`, 'ok');
+    renderQueue();
     return;
   }
   // 자동 투입
@@ -824,8 +885,66 @@ function resetSim() {
   document.getElementById('log-area').innerHTML = '<div class="log-line"><span class="log-time">──</span><span class="log-event" style="color:var(--muted)">초기화 완료 — 다시 시작하세요</span></div>';
   tokensSvg.innerHTML = '';
   renderTokenList();
+  renderQueue();
   updateStats();
 }
+
+// ══════════════════════════════════════════════════════════════
+//  INPUT (입력부) — 동적 투입 & 실시간 파라미터
+// ══════════════════════════════════════════════════════════════
+function populateGradeSelect() {
+  const sel = document.getElementById('in-grade');
+  sel.innerHTML = GRADES.map(g => `<option value="${g.id}">${g.id} · ${g.label} (${g.route})</option>`).join('');
+}
+
+function addManual() {
+  const grade = document.getElementById('in-grade').value;
+  const thickRaw = document.getElementById('in-thick').value;
+  const thick = thickRaw ? parseInt(thickRaw) : null;
+  const qty = Math.max(1, Math.min(20, parseInt(document.getElementById('in-qty').value) || 1));
+  for (let i = 0; i < qty; i++) manualQueue.push({ grade, thick });
+  addLog(`[예약] ${grade} ${thick ? thick + 'mm' : '랜덤두께'} × ${qty} → 투입 대기열`, 'ok');
+  renderQueue();
+}
+
+function clearQueue() { manualQueue = []; renderQueue(); }
+
+function renderQueue() {
+  const el = document.getElementById('io-queue');
+  if (!el) return;
+  if (!manualQueue.length) { el.innerHTML = '<span class="io-queue-empty">투입 대기열 비어 있음</span>'; return; }
+  const counts = {};
+  manualQueue.forEach(q => { const k = q.grade + '|' + (q.thick || 'R'); counts[k] = (counts[k] || 0) + 1; });
+  el.innerHTML = Object.entries(counts).map(([k, n]) => {
+    const [grade, thick] = k.split('|');
+    const g = gradeOf(grade);
+    return `<span class="q-chip"><span class="chip-dot" style="background:${g ? g.color : '#888'}"></span>${grade} ${thick === 'R' ? '랜덤' : thick + 'mm'} ×${n}</span>`;
+  }).join('');
+}
+
+function bindInputs() {
+  populateGradeSelect();
+  document.getElementById('btn-add').addEventListener('click', addManual);
+  document.getElementById('btn-clear-q').addEventListener('click', clearQueue);
+
+  const auto = document.getElementById('p-auto');
+  auto.addEventListener('change', () => { CONFIG.autoArrival = auto.checked; });
+
+  const bindRange = (id, key, vid, parse, fmt) => {
+    const inp = document.getElementById(id), out = document.getElementById(vid);
+    inp.addEventListener('input', () => {
+      CONFIG[key] = parse(inp.value);
+      out.textContent = fmt ? fmt(CONFIG[key]) : CONFIG[key];
+    });
+  };
+  bindRange('p-prob', 'arrivalProb', 'p-prob-v', v => parseFloat(v), v => v.toFixed(2));
+  bindRange('p-wip', 'maxWip', 'p-wip-v', v => parseInt(v));
+  bindRange('p-bn', 'bottleneckThreshold', 'p-bn-v', v => parseInt(v));
+
+  renderQueue();
+}
+
+document.addEventListener('DOMContentLoaded', bindInputs);
 </script>
 </body>
 </html>
