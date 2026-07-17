@@ -1,0 +1,24 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Logs / temp
+*.log
+tmp/
+.cache/
+
+# Node (향후 도구 도입 대비 — ROADMAP P3/P8)
+node_modules/
+package-lock.json
+npm-debug.log*
+
+# Playwright (스모크 테스트 도입 시)
+test-results/
+playwright-report/
