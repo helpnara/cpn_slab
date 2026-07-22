@@ -15,11 +15,13 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, APP_DIR)
 
 from src.model import GRADES, GRADE_BY_ID, STAGES, STAGE_BY_ID, temp_for  # noqa: E402
 from src.simulation import Config, Simulation  # noqa: E402
 from src import optimization as opt  # noqa: E402
+from src import data as datamod  # noqa: E402
 
 st.set_page_config(page_title="CPN 슬래브 물류 — 연주 부문", page_icon="🏭", layout="wide")
 
@@ -248,6 +250,97 @@ def render_optimization() -> None:
 
 
 # ══════════════════════════════════════════════════════════════
+#  탭 3 — 과거 데이터 (실데이터 가시화 · A1/A2)
+# ══════════════════════════════════════════════════════════════
+def render_data() -> None:
+    st.caption("과거 이벤트 로그(표준 스키마)를 불러와 물류를 가시화하고 병목 후보를 찾습니다 "
+               "— 실데이터 연동 전 형식 확정·데이터 감사를 위한 A1·A2 단계.")
+
+    choice = st.radio("데이터 소스", ["샘플 데이터", "CSV 업로드"], horizontal=True)
+    if choice == "CSV 업로드":
+        up = st.file_uploader("이벤트 로그 CSV", type=["csv"])
+        if up is None:
+            st.info("CSV를 업로드하거나 '샘플 데이터'를 선택하세요. "
+                    "필수 컬럼: heat_no, grade, stage, enter_time, exit_time "
+                    "(선택: width_mm, thickness_mm, equipment, reason_code, due_date)")
+            return
+        df = datamod.load_event_log(up)
+    else:
+        df = datamod.load_event_log(os.path.join(APP_DIR, "data", "sample_event_log.csv"))
+
+    issues = datamod.validate(df)
+    has_error = any(i["level"] == "error" for i in issues)
+    with st.expander(f"🔍 데이터 감사 결과 ({len(issues)}건)", expanded=has_error):
+        for it in issues:
+            {"error": st.error, "warn": st.warning, "info": st.caption}[it["level"]](it["msg"])
+    if has_error:
+        return
+
+    tmin, tmax = df["enter_time"].min(), df["exit_time"].max()
+    f = st.columns([2, 2])
+    with f[0]:
+        dr = st.date_input("기간", (tmin.date(), tmax.date()),
+                           min_value=tmin.date(), max_value=tmax.date())
+    with f[1]:
+        gsel = st.multiselect("강종", sorted(df["grade"].unique()),
+                              default=sorted(df["grade"].unique()))
+    if isinstance(dr, (tuple, list)) and len(dr) == 2:
+        d0, d1 = pd.Timestamp(dr[0]), pd.Timestamp(dr[1]) + pd.Timedelta(days=1)
+        df = df[(df["enter_time"] >= d0) & (df["enter_time"] < d1)]
+    if gsel:
+        df = df[df["grade"].isin(gsel)]
+    if df.empty:
+        st.warning("선택 조건에 해당하는 데이터가 없습니다.")
+        return
+
+    lead = datamod.lead_times(df)
+    m = st.columns(4)
+    m[0].metric("heat 수", f"{df['heat_no'].nunique()}")
+    m[1].metric("이벤트(행)", f"{len(df)}")
+    m[2].metric("평균 리드타임", f"{lead['lead_min'].mean() / 60:.1f} h")
+    span_h = (df["exit_time"].max() - df["enter_time"].min()).total_seconds() / 3600
+    m[3].metric("관측 기간", f"{span_h:.0f} h")
+
+    st.subheader("🚧 병목 후보 — 설비별 평균 체류시간")
+    bn = datamod.bottleneck_ranking(df)
+    top = bn.iloc[0]["label"] if len(bn) else None
+    fig_bn = go.Figure(go.Bar(
+        x=bn["mean"], y=bn["label"], orientation="h",
+        marker_color=[HOT if lbl == top else STEEL for lbl in bn["label"]],
+        text=[f"{v:.0f}분 (n={int(n)})" for v, n in zip(bn["mean"], bn["count"])],
+        textposition="outside"))
+    fig_bn.update_layout(height=300, margin=dict(l=0, r=70, t=10, b=0), paper_bgcolor=TRANSPARENT,
+                         plot_bgcolor=TRANSPARENT, yaxis=dict(autorange="reversed"),
+                         font_color="#e6edf3")
+    st.plotly_chart(fig_bn, use_container_width=True)
+    if top:
+        st.caption(f"평균 체류시간이 가장 긴 공정: **{top}** → 다음 단계(C. 원인 분석) 최우선 후보")
+
+    left, right = st.columns(2)
+    with left:
+        st.subheader("WIP 추이 (시간축)")
+        wip = datamod.wip_timeline(df)
+        fig_wip = go.Figure(go.Scatter(x=wip["t"], y=wip["wip"], mode="lines",
+                                       fill="tozeroy", line_color=ACCENT2))
+        fig_wip.update_layout(height=260, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor=TRANSPARENT,
+                              plot_bgcolor=TRANSPARENT, font_color="#e6edf3", yaxis_title="WIP")
+        st.plotly_chart(fig_wip, use_container_width=True)
+    with right:
+        st.subheader("강종별 평균 리드타임 (시간)")
+        lg = lead.groupby("grade")["lead_min"].mean().reset_index()
+        fig_lg = go.Figure(go.Bar(
+            x=lg["grade"], y=lg["lead_min"] / 60,
+            marker_color=[GRADE_BY_ID[g].color if g in GRADE_BY_ID else STEEL for g in lg["grade"]],
+            text=[f"{v / 60:.1f}h" for v in lg["lead_min"]], textposition="outside"))
+        fig_lg.update_layout(height=260, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor=TRANSPARENT,
+                             plot_bgcolor=TRANSPARENT, font_color="#e6edf3")
+        st.plotly_chart(fig_lg, use_container_width=True)
+
+    with st.expander("데이터 미리보기 (상위 20행)"):
+        st.dataframe(df.head(20), use_container_width=True, hide_index=True)
+
+
+# ══════════════════════════════════════════════════════════════
 #  메인
 # ══════════════════════════════════════════════════════════════
 sim = get_sim()
@@ -293,7 +386,10 @@ with st.sidebar:
 st.markdown("###### COLORED PETRI NET · 연주 부문")
 st.title("슬래브 물류 · 스케줄 최적화")
 
-tab_sim, tab_opt = st.tabs(["🔄 물류 시뮬레이션", "🧩 제약·최적화 예시 (인터뷰용)"])
+tab_data, tab_sim, tab_opt = st.tabs(
+    ["📥 과거 데이터 (가시화·병목)", "🔄 물류 시뮬레이션", "🧩 제약·최적화 예시 (인터뷰용)"])
+with tab_data:
+    render_data()
 with tab_sim:
     render_simulation(sim)
 with tab_opt:
