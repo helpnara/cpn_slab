@@ -22,6 +22,7 @@ from src.model import GRADES, GRADE_BY_ID, STAGES, STAGE_BY_ID, temp_for  # noqa
 from src.simulation import Config, Simulation  # noqa: E402
 from src import optimization as opt  # noqa: E402
 from src import data as datamod  # noqa: E402
+from src import whatif as wi  # noqa: E402
 
 st.set_page_config(page_title="CPN 슬래브 물류 — 연주 부문", page_icon="🏭", layout="wide")
 
@@ -432,6 +433,64 @@ def render_cause() -> None:
 
 
 # ══════════════════════════════════════════════════════════════
+#  탭 — 개선 what-if (D: Prescriptive)
+# ══════════════════════════════════════════════════════════════
+def render_whatif() -> None:
+    st.caption("C(원인 분석)의 결론 — 병목(몰드)의 최대 지연 원인은 강종 전환 — 을 받아, 같은 heat들을 "
+               "주조 순서만 바꿔 개선 효과를 정량화합니다 (D. 개선 what-if). 결정론적 비교라 차이는 "
+               "오롯이 ‘순서 결정’에서 옵니다.")
+    df = datamod.load_event_log(os.path.join(APP_DIR, "data", "sample_event_log.csv"))
+    window = st.slider("윈도우 크기 (도착 순서를 재배치하는 범위)", 4, 14, 8)
+    r = wi.compare(df, window=window)
+    b, w_, g = r["baseline"], r["windowed"], r["grouped"]
+
+    st.markdown(f"#### 개선(윈도우 그룹핑, w={window}) — 기준 대비")
+    m = st.columns(4)
+    m[0].metric("강종 전환", f"{w_['grade_changes']:.0f} 회",
+                delta=f"{w_['grade_changes'] - b['grade_changes']:.0f} 회", delta_color="inverse")
+    m[1].metric("총 셋업", f"{w_['setup_min']:.0f} 분",
+                delta=f"{w_['setup_min'] - b['setup_min']:.0f} 분", delta_color="inverse")
+    m[2].metric("몰드 가동률", f"{w_['mold_util_pct']:.0f} %",
+                delta=f"{w_['mold_util_pct'] - b['mold_util_pct']:.1f} %p", delta_color="inverse")
+    m[3].metric("평균 리드타임", f"{w_['avg_lead_min']:.0f} 분",
+                delta=f"{(w_['avg_lead_min'] - b['avg_lead_min']) / b['avg_lead_min'] * 100:.1f} %",
+                delta_color="inverse")
+
+    labels = {"grade_changes": "강종 전환(회)", "setup_min": "총 셋업(분)",
+              "mold_util_pct": "몰드 가동률(%)", "avg_lead_min": "평균 리드타임(분)",
+              "throughput_per_h": "처리량(개/h)", "wip_peak": "WIP 피크"}
+    st.markdown("#### 정책별 KPI 비교")
+    table = pd.DataFrame({
+        "지표": list(labels.values()),
+        "기준(도착순)": [round(b[k], 1) for k in labels],
+        f"윈도우 그룹핑(w={window})": [round(w_[k], 1) for k in labels],
+        "전체 그룹핑(상한)": [round(g[k], 1) for k in labels],
+    })
+    st.dataframe(table, use_container_width=True, hide_index=True)
+
+    st.markdown("#### 기준 대비(%) — 낮을수록 개선 (전환·셋업·가동률·리드타임)")
+    keys = ["grade_changes", "setup_min", "mold_util_pct", "avg_lead_min"]
+    knames = [labels[k] for k in keys]
+    fig = go.Figure()
+    fig.add_bar(x=knames, y=[w_[k] / b[k] * 100 for k in keys],
+                name=f"윈도우 그룹핑(w={window})", marker_color=STEEL,
+                text=[f"{w_[k] / b[k] * 100:.0f}" for k in keys], textposition="outside")
+    fig.add_bar(x=knames, y=[g[k] / b[k] * 100 for k in keys],
+                name="전체 그룹핑(상한)", marker_color=ACCENT2,
+                text=[f"{g[k] / b[k] * 100:.0f}" for k in keys], textposition="outside")
+    fig.add_hline(y=100, line_dash="dot", line_color=MUTED)
+    fig.update_layout(barmode="group", height=320, margin=dict(l=0, r=0, t=10, b=0),
+                      paper_bgcolor=TRANSPARENT, plot_bgcolor=TRANSPARENT, font_color="#e6edf3",
+                      yaxis_title="기준=100%", legend=dict(orientation="h", y=1.15))
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.success("💡 **윈도우 그룹핑**은 전환·셋업·병목을 줄이면서 **리드타임까지 개선**(버스트 없음). "
+               "반면 **전체 그룹핑**은 병목은 더 줄지만 같은 강종이 몰려 상류(RH)에 버스트가 생겨 리드타임이 "
+               "악화됩니다 — 한 목적만 밀면 부작용이 납니다. 그래서 **납기·폭·흐름 제약을 함께 고려한 시퀀싱 "
+               "최적화(E)** 가 필요합니다 → ‘제약·최적화 예시’ 탭.")
+
+
+# ══════════════════════════════════════════════════════════════
 #  메인
 # ══════════════════════════════════════════════════════════════
 sim = get_sim()
@@ -477,13 +536,15 @@ with st.sidebar:
 st.markdown("###### COLORED PETRI NET · 연주 부문")
 st.title("슬래브 물류 · 스케줄 최적화")
 
-tab_data, tab_cause, tab_sim, tab_opt = st.tabs(
-    ["📥 과거 데이터 (가시화·병목)", "🔎 원인 분석", "🔄 물류 시뮬레이션",
+tab_data, tab_cause, tab_whatif, tab_sim, tab_opt = st.tabs(
+    ["📥 과거 데이터 (가시화·병목)", "🔎 원인 분석", "📈 개선 what-if", "🔄 물류 시뮬레이션",
      "🧩 제약·최적화 예시 (인터뷰용)"])
 with tab_data:
     render_data()
 with tab_cause:
     render_cause()
+with tab_whatif:
+    render_whatif()
 with tab_sim:
     render_simulation(sim)
 with tab_opt:
