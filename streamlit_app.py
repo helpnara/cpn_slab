@@ -341,6 +341,97 @@ def render_data() -> None:
 
 
 # ══════════════════════════════════════════════════════════════
+#  탭 — 원인 분석 (C: Diagnostic)
+# ══════════════════════════════════════════════════════════════
+def render_cause() -> None:
+    st.caption("샘플 과거 로그 기준 — 병목의 원인을 대기/처리/블로킹 분해·가동률·사유코드·강종 전환으로 "
+               "진단합니다 (C. 원인 분석). 실데이터도 동일 스키마로 분석됩니다.")
+    df = datamod.load_event_log(os.path.join(APP_DIR, "data", "sample_event_log.csv"))
+    if not datamod.has_decomposition(df):
+        st.warning("start_time·proc_end_time 가 없어 대기/블로킹 분해가 불가합니다(체류시간만 분석 가능).")
+        return
+
+    util = datamod.utilization(df)
+    bd = datamod.time_breakdown(df)
+    cause = datamod.blocking_by_cause(df)
+    reasons = datamod.reason_impact(df)
+    trans = datamod.transition_effect(df)
+
+    top_util = util.sort_values("util_pct", ascending=False).iloc[0]
+    bd = bd.assign(total=bd[["wait_min", "proc_min", "block_min"]].sum(axis=1))
+    top_dwell = bd.sort_values("total", ascending=False).iloc[0]
+    top_reason = reasons.iloc[0] if len(reasons) else None
+
+    c = st.columns(3)
+    c[0].metric("병목 설비 (가동률)", top_util["label"], delta=f"{top_util['util_pct']:.0f}%",
+                delta_color="off")
+    c[1].metric("최장 체류 공정", top_dwell["label"], delta=f"{top_dwell['total']:.0f} 분/heat",
+                delta_color="off")
+    if top_reason is not None:
+        c[2].metric("최대 지연 사유", top_reason["reason_code"],
+                    delta=f"{top_reason['delay_min']:.0f} 분", delta_color="off")
+
+    blocker = cause.iloc[0] if len(cause) else None
+    if blocker is not None and blocker["block_caused_min"] > 0:
+        st.error(f"🎯 근본 원인 추정: **{top_util['label']}**(가동률 {top_util['util_pct']:.0f}%)가 포화되어 "
+                 f"상류에 블로킹을 유발 — 블로킹 유발 1위 **{blocker['label']}** "
+                 f"({blocker['block_caused_min']:.0f}분).")
+
+    st.subheader("① 체류시간 분해 — 대기 / 처리 / 블로킹 (heat당 평균)")
+    fig = go.Figure()
+    fig.add_bar(y=bd["label"], x=bd["wait_min"], name="대기(큐)", orientation="h", marker_color=ACCENT2)
+    fig.add_bar(y=bd["label"], x=bd["proc_min"], name="처리", orientation="h", marker_color=STEEL)
+    fig.add_bar(y=bd["label"], x=bd["block_min"], name="블로킹(하류 막힘)", orientation="h",
+                marker_color=HOT)
+    fig.update_layout(barmode="stack", height=320, margin=dict(l=0, r=0, t=10, b=0),
+                      paper_bgcolor=TRANSPARENT, plot_bgcolor=TRANSPARENT, font_color="#e6edf3",
+                      yaxis=dict(autorange="reversed"), xaxis_title="분/heat",
+                      legend=dict(orientation="h", y=1.15))
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("‘블로킹’은 처리를 마쳤지만 하류가 막혀 반출 못 한 시간 — 턴디시 블로킹의 원인은 몰드.")
+
+    lft, rgt = st.columns(2)
+    with lft:
+        st.subheader("② 설비 가동률")
+        umax = util["util_pct"].max()
+        fig_u = go.Figure(go.Bar(
+            x=util["util_pct"], y=util["label"], orientation="h",
+            marker_color=[HOT if v == umax else STEEL for v in util["util_pct"]],
+            text=[f"{v:.0f}%" for v in util["util_pct"]], textposition="outside"))
+        fig_u.update_layout(height=300, margin=dict(l=0, r=40, t=10, b=0), paper_bgcolor=TRANSPARENT,
+                            plot_bgcolor=TRANSPARENT, font_color="#e6edf3",
+                            yaxis=dict(autorange="reversed"), xaxis=dict(range=[0, 110]))
+        st.plotly_chart(fig_u, use_container_width=True)
+        st.caption("가동률이 낮은 공정은 병목에 막혀 놀고 있음(starving) — 포화된 몰드가 전체를 제약.")
+    with rgt:
+        st.subheader("③ 사유코드별 지연 기여 (분)")
+        fig_r = go.Figure(go.Bar(
+            x=reasons["delay_min"], y=reasons["reason_code"], orientation="h", marker_color=ACCENT,
+            text=[f"{v:.0f}분 (n={int(n)})" for v, n in zip(reasons["delay_min"], reasons["count"])],
+            textposition="outside"))
+        fig_r.update_layout(height=300, margin=dict(l=0, r=70, t=10, b=0), paper_bgcolor=TRANSPARENT,
+                            plot_bgcolor=TRANSPARENT, font_color="#e6edf3",
+                            yaxis=dict(autorange="reversed"),
+                            xaxis=dict(range=[0, reasons["delay_min"].max() * 1.25]))
+        st.plotly_chart(fig_r, use_container_width=True)
+
+    if trans is not None and len(trans) == 2:
+        st.subheader("④ 강종 전환이 몰드 처리시간에 미치는 영향")
+        fig_t = go.Figure(go.Bar(
+            x=trans["구분"], y=trans["mean"],
+            marker_color=[HOT if k == "강종 전환" else STEEL for k in trans["구분"]],
+            text=[f"{m:.1f}분 (n={int(n)})" for m, n in zip(trans["mean"], trans["count"])],
+            textposition="outside"))
+        fig_t.update_layout(height=260, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor=TRANSPARENT,
+                            plot_bgcolor=TRANSPARENT, font_color="#e6edf3", yaxis_title="평균 처리시간(분)")
+        st.plotly_chart(fig_t, use_container_width=True)
+
+    st.success("💡 개선 시사점: 병목(몰드)의 최대 지연 원인은 **강종 전환 셋업**입니다. "
+               "같은 강종을 묶어 주조 순서를 정하면(캐스트 시퀀싱) 전환을 줄여 병목을 완화할 수 있습니다 "
+               "→ **‘제약·최적화 예시’ 탭**에서 그 효과를 확인하세요.")
+
+
+# ══════════════════════════════════════════════════════════════
 #  메인
 # ══════════════════════════════════════════════════════════════
 sim = get_sim()
@@ -386,10 +477,13 @@ with st.sidebar:
 st.markdown("###### COLORED PETRI NET · 연주 부문")
 st.title("슬래브 물류 · 스케줄 최적화")
 
-tab_data, tab_sim, tab_opt = st.tabs(
-    ["📥 과거 데이터 (가시화·병목)", "🔄 물류 시뮬레이션", "🧩 제약·최적화 예시 (인터뷰용)"])
+tab_data, tab_cause, tab_sim, tab_opt = st.tabs(
+    ["📥 과거 데이터 (가시화·병목)", "🔎 원인 분석", "🔄 물류 시뮬레이션",
+     "🧩 제약·최적화 예시 (인터뷰용)"])
 with tab_data:
     render_data()
+with tab_cause:
+    render_cause()
 with tab_sim:
     render_simulation(sim)
 with tab_opt:

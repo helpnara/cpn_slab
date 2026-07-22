@@ -1,22 +1,17 @@
-"""데이터 계층 (A1 스키마·감사 / A2 로더·샘플).
+"""데이터 계층 (A1 스키마·감사 / A2 로더·샘플 / C 원인분석 지표).
 
 과거 물류 이벤트 로그의 **표준 스키마**를 정의하고, 로드·검증(데이터 감사)과
-가시화·병목 분석용 파생지표를 계산합니다. 실데이터가 들어오기 전이라도 형식을
-확정하고 데모를 돌릴 수 있도록 현실적인 **샘플 로그 생성기**를 포함합니다.
+가시화·병목·**원인 분석**용 파생지표를 계산합니다.
 
 표준 스키마 — "공정 방문(stage-visit)" 롱 포맷 (1행 = heat 1개의 공정 1회 통과):
-    heat_no      : 케이스 ID (예: H0001)
-    grade        : 강종 (SUS304/SS400/API5L …)
-    width_mm     : 슬래브 폭(mm)
-    thickness_mm : 두께(mm)
-    stage        : 공정 위치 (model.STAGES의 id 또는 라벨)
-    enter_time   : 공정 진입 시각 (ISO datetime)
-    exit_time    : 공정 이탈 시각 (ISO datetime)
-    equipment    : (선택) 설비 식별 (예: MOLD-1)
-    reason_code  : (선택) 지연/사유 코드
-    due_date     : (선택) 납기 (ISO datetime)
+    heat_no, grade, width_mm, thickness_mm, stage,
+    enter_time      : 공정 버퍼 진입(도착)
+    start_time      : 처리 시작   (선택 · 있으면 대기/처리 분해 가능)
+    proc_end_time   : 처리 완료   (선택 · 있으면 블로킹 분해 가능)
+    exit_time       : 공정 이탈(반출)
+    equipment, reason_code, due_date
 
-체류시간 dwell = exit_time - enter_time (대기+처리 포함).
+시간 분해:  대기=start-enter,  처리=proc_end-start,  블로킹=exit-proc_end,  체류=exit-enter.
 """
 from __future__ import annotations
 
@@ -29,33 +24,40 @@ import pandas as pd
 from .model import GRADES, STAGE_BY_ID, STAGES, stages_for
 
 REQUIRED_COLUMNS = ["heat_no", "grade", "stage", "enter_time", "exit_time"]
-OPTIONAL_COLUMNS = ["width_mm", "thickness_mm", "equipment", "reason_code", "due_date"]
-ALL_COLUMNS = REQUIRED_COLUMNS[:2] + ["width_mm", "thickness_mm"] + \
-    ["stage", "enter_time", "exit_time", "equipment", "reason_code", "due_date"]
+OPTIONAL_COLUMNS = ["width_mm", "thickness_mm", "start_time", "proc_end_time",
+                    "equipment", "reason_code", "due_date"]
+ALL_COLUMNS = ["heat_no", "grade", "width_mm", "thickness_mm", "stage",
+               "enter_time", "start_time", "proc_end_time", "exit_time",
+               "equipment", "reason_code", "due_date"]
+TIME_COLUMNS = ["enter_time", "start_time", "proc_end_time", "exit_time", "due_date"]
 
-# stage id 또는 한국어 라벨 → 표준 id
 _STAGE_LOOKUP = {s.id: s.id for s in STAGES}
 _STAGE_LOOKUP.update({s.label: s.id for s in STAGES})
 
-_REASONS = ["설비점검", "래들지연", "온도조정", "폭변경셋업", "크레인대기", ""]
+_BREAKDOWN_REASONS = ["설비점검", "래들지연", "온도조정", "크레인대기"]
 _PROC_MINUTES = 6  # proc 1스텝당 기준 처리시간(분)
 
 
 # ══════════════════════════════════════════════════════════════
-#  샘플 생성 (A2) — 설비 용량 경합으로 실제 병목이 찍히도록 스케줄링
+#  샘플 생성 (A2) — 용량 경합·블로킹·전환 셋업을 모델링해
+#                    원인 분석(C)이 의미 있게 나오도록 함
 # ══════════════════════════════════════════════════════════════
 def generate_sample_event_log(n_heats: int = 120, start: str = "2026-06-01 06:00",
-                              interarrival_min: float = 13.0, seed: int = 42) -> pd.DataFrame:
+                              interarrival_min: float = 21.0, seed: int = 42) -> pd.DataFrame:
     rng = random.Random(seed)
     t0 = pd.Timestamp(start)
     grade_ids = [g.id for g in GRADES]
+    route_of = {g.id: g.route for g in GRADES}
     weights = [0.34, 0.4, 0.26]
 
-    # 설비 용량 슬롯의 다음 가용 시각
     free: dict[str, list[pd.Timestamp]] = {}
+    last_job: dict[tuple, tuple] = {}  # (stage, slot) -> (grade, width)
     for s in STAGES:
         cap = 1 if s.cap == float("inf") else int(s.cap)
-        free[s.id] = [t0] * cap  # inf 공정은 실질 무경합(슬롯 재사용 안 해도 무방)
+        free[s.id] = [t0] * cap
+
+    def earliest_slot(sid: str) -> int:
+        return min(range(len(free[sid])), key=lambda k: free[sid][k])
 
     rows = []
     for i in range(1, n_heats + 1):
@@ -63,45 +65,59 @@ def generate_sample_event_log(n_heats: int = 120, start: str = "2026-06-01 06:00
         grade = rng.choices(grade_ids, weights)[0]
         width = rng.choice([1000, 1050, 1250, 1450, 1500, 1550, 1600])
         thick = rng.randint(200, 300)
-        arrival = t0 + pd.Timedelta(minutes=interarrival_min * (i - 1)
-                                    + rng.uniform(-2, 2))
+        arrival = t0 + pd.Timedelta(minutes=interarrival_min * (i - 1) + rng.uniform(-2, 2))
         due = arrival + pd.Timedelta(hours=rng.uniform(4, 10))
+        route = stages_for(route_of[grade])
         ready = arrival
-        for sid in stages_for(GRADES[grade_ids.index(grade)].route):
+        for idx, sid in enumerate(route):
             stg = STAGE_BY_ID[sid]
             infinite = stg.cap == float("inf")
             enter = ready
-            if infinite:
-                start_t = ready
-                slot = 0
-            else:
-                slot = min(range(len(free[sid])), key=lambda k: free[sid][k])
-                start_t = max(ready, free[sid][slot])
-            proc = _PROC_MINUTES * stg.proc * rng.uniform(0.8, 1.3)
+            slot = 0 if infinite else earliest_slot(sid)
+            start_t = ready if infinite else max(ready, free[sid][slot])
+
+            proc = _PROC_MINUTES * stg.proc * rng.uniform(0.85, 1.25)
             reason = ""
-            if rng.random() < 0.08:  # 간헐 지연
-                proc += rng.uniform(10, 40)
-                reason = rng.choice(_REASONS[:-1])
-            exit_t = start_t + pd.Timedelta(minutes=proc)
+            # 연주기(몰드) 전환 셋업 — 강종/폭 변경 시 처리시간 증가
+            if sid == "mold" and not infinite:
+                prev = last_job.get((sid, slot))
+                if prev is not None and prev[0] != grade:
+                    proc += rng.uniform(6, 12); reason = "강종전환셋업"
+                elif prev is not None and abs(prev[1] - width) > 200:
+                    proc += rng.uniform(3, 7); reason = "폭변경셋업"
+            # 간헐 설비/공정 지연
+            if rng.random() < 0.05:
+                proc += rng.uniform(8, 25)
+                reason = reason or rng.choice(_BREAKDOWN_REASONS)
+
+            proc_end = start_t + pd.Timedelta(minutes=proc)
+            # 블로킹 — 턴디시는 처리 완료 후 몰드가 빌 때까지 반출 대기(긴밀 결합).
+            # 그 외 공정은 처리 완료 즉시 다음 버퍼로 이동(대기는 각 공정 큐에서 발생).
+            if sid == "tundish":
+                move = max(proc_end, free["mold"][earliest_slot("mold")])
+            else:
+                move = proc_end
+            exit_t = move
             if not infinite:
                 free[sid][slot] = exit_t
+                last_job[(sid, slot)] = (grade, width)
+
             rows.append({
                 "heat_no": heat, "grade": grade, "width_mm": width, "thickness_mm": thick,
-                "stage": sid, "enter_time": enter, "exit_time": exit_t,
-                "equipment": f"{sid.upper()}-{slot + 1}", "reason_code": reason,
-                "due_date": due,
+                "stage": sid, "enter_time": enter, "start_time": start_t,
+                "proc_end_time": proc_end, "exit_time": exit_t,
+                "equipment": f"{sid.upper()}-{slot + 1}", "reason_code": reason, "due_date": due,
             })
             ready = exit_t
-    df = pd.DataFrame(rows, columns=ALL_COLUMNS)
-    return df
+    return pd.DataFrame(rows, columns=ALL_COLUMNS)
 
 
 # ══════════════════════════════════════════════════════════════
-#  로드 & 검증 (A1 데이터 감사)
+#  로드 & 검증 (A1)
 # ══════════════════════════════════════════════════════════════
 def load_event_log(source: Union[str, io.IOBase, pd.DataFrame]) -> pd.DataFrame:
     df = source.copy() if isinstance(source, pd.DataFrame) else pd.read_csv(source)
-    for col in ("enter_time", "exit_time", "due_date"):
+    for col in TIME_COLUMNS:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
     if "stage" in df.columns:
@@ -110,34 +126,38 @@ def load_event_log(source: Union[str, io.IOBase, pd.DataFrame]) -> pd.DataFrame:
 
 
 def validate(df: pd.DataFrame) -> list[dict]:
-    """데이터 감사 — 문제 목록 반환 [{level, msg}]."""
     issues: list[dict] = []
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
         issues.append({"level": "error", "msg": f"필수 컬럼 누락: {missing}"})
-        return issues  # 필수 컬럼 없으면 이후 검증 불가
-
+        return issues
     n = len(df)
     for col in ("enter_time", "exit_time"):
         nulls = int(df[col].isna().sum())
         if nulls:
             issues.append({"level": "warn", "msg": f"{col} 파싱 실패/결측 {nulls}건"})
-    bad_order = int((df["exit_time"] < df["enter_time"]).sum())
-    if bad_order:
-        issues.append({"level": "error", "msg": f"exit_time < enter_time 인 행 {bad_order}건"})
+    bad = int((df["exit_time"] < df["enter_time"]).sum())
+    if bad:
+        issues.append({"level": "error", "msg": f"exit_time < enter_time 인 행 {bad}건"})
     unknown = sorted(set(df["stage"]) - set(s.id for s in STAGES))
     if unknown:
         issues.append({"level": "warn", "msg": f"미정의 공정(stage): {unknown}"})
-    for col in OPTIONAL_COLUMNS:
-        if col not in df.columns:
-            issues.append({"level": "info", "msg": f"선택 컬럼 없음: {col}"})
-    if not issues:
+    has_decomp = {"start_time", "proc_end_time"}.issubset(df.columns)
+    if not has_decomp:
+        issues.append({"level": "info",
+                       "msg": "start_time/proc_end_time 없음 → 대기·블로킹 분해 불가(체류시간만 분석)"})
+    if not any(i["level"] in ("error", "warn") for i in issues):
         issues.append({"level": "info", "msg": f"검증 통과 · {n}행 · heat {df['heat_no'].nunique()}건"})
     return issues
 
 
+def has_decomposition(df: pd.DataFrame) -> bool:
+    return {"start_time", "proc_end_time"}.issubset(df.columns) \
+        and df["start_time"].notna().any() and df["proc_end_time"].notna().any()
+
+
 # ══════════════════════════════════════════════════════════════
-#  파생 지표 (Phase B/C 씨앗)
+#  파생 지표 (B: 가시화)
 # ══════════════════════════════════════════════════════════════
 def with_dwell(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -148,23 +168,24 @@ def with_dwell(df: pd.DataFrame) -> pd.DataFrame:
 def lead_times(df: pd.DataFrame) -> pd.DataFrame:
     g = df.groupby("heat_no")
     lead = (g["exit_time"].max() - g["enter_time"].min()).dt.total_seconds() / 60
-    grade = g["grade"].first()
-    return pd.DataFrame({"heat_no": lead.index, "grade": grade.values,
+    return pd.DataFrame({"heat_no": lead.index, "grade": g["grade"].first().values,
                          "lead_min": lead.values})
+
+
+def _stage_order(series: pd.Series) -> pd.Series:
+    order = {s.id: i for i, s in enumerate(STAGES)}
+    return series.map(order).fillna(999)
 
 
 def stage_dwell(df: pd.DataFrame) -> pd.DataFrame:
     d = with_dwell(df)
     agg = d.groupby("stage")["dwell_min"].agg(["mean", "median", "count"]).reset_index()
-    order = {s.id: i for i, s in enumerate(STAGES)}
-    agg["_o"] = agg["stage"].map(order).fillna(999)
     agg["label"] = agg["stage"].map(lambda s: STAGE_BY_ID[s].label if s in STAGE_BY_ID else s)
-    return agg.sort_values("_o").drop(columns="_o").reset_index(drop=True)
+    return agg.sort_values("stage", key=_stage_order).reset_index(drop=True)
 
 
 def bottleneck_ranking(df: pd.DataFrame) -> pd.DataFrame:
-    agg = stage_dwell(df).sort_values("mean", ascending=False).reset_index(drop=True)
-    return agg
+    return stage_dwell(df).sort_values("mean", ascending=False).reset_index(drop=True)
 
 
 def wip_timeline(df: pd.DataFrame) -> pd.DataFrame:
@@ -182,8 +203,86 @@ def throughput(df: pd.DataFrame, freq: str = "1h") -> pd.DataFrame:
     return pd.DataFrame({"time": tp.index, "completed": tp.values})
 
 
+# ══════════════════════════════════════════════════════════════
+#  원인 분석 (C: Diagnostic)
+# ══════════════════════════════════════════════════════════════
+def decompose(df: pd.DataFrame) -> pd.DataFrame:
+    """대기/처리/블로킹 분해 (start_time·proc_end_time 필요)."""
+    d = df.copy()
+    mins = lambda a, b: (d[a] - d[b]).dt.total_seconds() / 60
+    d["wait_min"] = mins("start_time", "enter_time").clip(lower=0)
+    d["proc_min"] = mins("proc_end_time", "start_time").clip(lower=0)
+    d["block_min"] = mins("exit_time", "proc_end_time").clip(lower=0)
+    return d
+
+
+def time_breakdown(df: pd.DataFrame) -> pd.DataFrame:
+    """공정별 평균 대기/처리/블로킹(heat당 분)."""
+    d = decompose(df)
+    agg = d.groupby("stage")[["wait_min", "proc_min", "block_min"]].mean().reset_index()
+    agg["label"] = agg["stage"].map(lambda s: STAGE_BY_ID[s].label if s in STAGE_BY_ID else s)
+    return agg.sort_values("stage", key=_stage_order).reset_index(drop=True)
+
+
+def blocking_by_cause(df: pd.DataFrame) -> pd.DataFrame:
+    """각 공정이 '유발한' 하류 블로킹 총량(분). block at S 는 다음 공정 S+1 이 원인."""
+    d = decompose(df).sort_values(["heat_no", "enter_time"])
+    causer_total: dict[str, float] = {}
+    for _, g in d.groupby("heat_no"):
+        stages_seq = g["stage"].tolist()
+        blocks = g["block_min"].tolist()
+        for k in range(len(stages_seq) - 1):
+            causer = stages_seq[k + 1]  # 다음 공정이 자리 없어 막음
+            causer_total[causer] = causer_total.get(causer, 0.0) + blocks[k]
+    rows = [{"stage": s, "label": STAGE_BY_ID[s].label if s in STAGE_BY_ID else s,
+             "block_caused_min": v} for s, v in causer_total.items()]
+    out = pd.DataFrame(rows)
+    return out.sort_values("block_caused_min", ascending=False).reset_index(drop=True) if len(out) else out
+
+
+def utilization(df: pd.DataFrame) -> pd.DataFrame:
+    """공정별 설비 가동률(%) = Σ처리시간 / (관측기간 × 용량). 낮으면 상류 공급부족(starving) 신호."""
+    d = decompose(df)
+    span_min = (df["exit_time"].max() - df["enter_time"].min()).total_seconds() / 60
+    rows = []
+    for s in STAGES:
+        sub = d[d["stage"] == s.id]
+        if sub.empty:
+            continue
+        cap = 1 if s.cap == float("inf") else int(s.cap)
+        util = sub["proc_min"].sum() / (span_min * cap) * 100 if span_min > 0 else 0
+        rows.append({"stage": s.id, "label": s.label, "util_pct": min(util, 100.0)})
+    return pd.DataFrame(rows)
+
+
+def reason_impact(df: pd.DataFrame) -> pd.DataFrame:
+    """사유코드별 지연 기여 — 사유가 있는 방문의 (처리시간 - 공정 정상치) 합(분)."""
+    d = decompose(df)
+    nominal = d[d["reason_code"].fillna("") == ""].groupby("stage")["proc_min"].median()
+    rows = []
+    delayed = d[d["reason_code"].fillna("") != ""]
+    for reason, g in delayed.groupby("reason_code"):
+        excess = (g["proc_min"] - g["stage"].map(nominal).fillna(0)).clip(lower=0).sum()
+        rows.append({"reason_code": reason, "delay_min": excess, "count": len(g)})
+    out = pd.DataFrame(rows)
+    return out.sort_values("delay_min", ascending=False).reset_index(drop=True) if len(out) else out
+
+
+def transition_effect(df: pd.DataFrame, stage: str = "mold") -> Optional[pd.DataFrame]:
+    """특정 공정에서 강종 전환 여부에 따른 평균 처리시간 비교(세트업 영향)."""
+    d = decompose(df)
+    sub = d[d["stage"] == stage].copy()
+    if sub.empty:
+        return None
+    sub = sub.sort_values(["equipment", "start_time"])
+    sub["prev_grade"] = sub.groupby("equipment")["grade"].shift()
+    sub = sub.dropna(subset=["prev_grade"])
+    sub["구분"] = (sub["grade"] != sub["prev_grade"]).map({True: "강종 전환", False: "동일 강종"})
+    agg = sub.groupby("구분")["proc_min"].agg(["mean", "count"]).reset_index()
+    return agg
+
+
 if __name__ == "__main__":
-    # 샘플 CSV 재생성:  python -m src.data
     sample = generate_sample_event_log()
     sample.to_csv("data/sample_event_log.csv", index=False)
     print(f"wrote data/sample_event_log.csv  ({len(sample)} rows, "
