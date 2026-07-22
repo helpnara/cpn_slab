@@ -14,6 +14,14 @@ desktop.ini
 tmp/
 .cache/
 
+# Python (Streamlit 마이그레이션)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.streamlit/secrets.toml
+
 # Node (향후 도구 도입 대비 — ROADMAP P3/P8)
 node_modules/
 package-lock.json
