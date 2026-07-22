@@ -13,6 +13,8 @@
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — CPN 모델(강종/Place/경로/Guard), 코드 구조, 함수 맵
 - [docs/MAINTENANCE.md](docs/MAINTENANCE.md) — 강종·공정·경로 추가, 파라미터 튜닝, 변경 후 체크리스트
 - [docs/ROADMAP.md](docs/ROADMAP.md) — 알려진 한계와 개선 백로그
+- [docs/DEV_PLAN.md](docs/DEV_PLAN.md) — 개발 방향 타당성 검토 · 단계별 TODO(가시화→병목→원인→개선→가이던스)
+- [docs/OPTIMIZATION_SPEC.md](docs/OPTIMIZATION_SPEC.md) — 최적화 문제 정의(현업 인터뷰 양식)
 
 ## 작업 규칙
 
