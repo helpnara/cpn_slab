@@ -23,6 +23,7 @@ from src.simulation import Config, Simulation  # noqa: E402
 from src import optimization as opt  # noqa: E402
 from src import data as datamod  # noqa: E402
 from src import whatif as wi  # noqa: E402
+from src import guidance as guide  # noqa: E402
 
 st.set_page_config(page_title="CPN 슬래브 물류 — 연주 부문", page_icon="🏭", layout="wide")
 
@@ -491,6 +492,54 @@ def render_whatif() -> None:
 
 
 # ══════════════════════════════════════════════════════════════
+#  탭 — 라우팅 가이던스 (E: Decision support · 데모)
+# ══════════════════════════════════════════════════════════════
+def render_guidance() -> None:
+    st.caption("신규 슬래브가 들어왔을 때 현재 공정 상태·강종 전환·납기를 고려해 이동 방향과 주조 조치를 "
+               "추천하는 의사결정 지원 데모 (E. 라우팅 가이던스). 규칙 기반이라 근거가 투명합니다. "
+               "실제 규칙·가중치는 인터뷰로 확정하고 D2(CP-SAT)로 승급 예정.")
+
+    grade_ids = [g.id for g in GRADES]
+    a, b = st.columns(2)
+    with a:
+        st.markdown("**① 신규 슬래브**")
+        grade = st.selectbox("강종", grade_ids,
+                             format_func=lambda x: f"{x} ({GRADE_BY_ID[x].label})", key="g_grade")
+        width = st.number_input("폭(mm)", 900, 1700, 1250, 50, key="g_w")
+        urgent = st.checkbox("납기 임박", key="g_urgent")
+    with b:
+        st.markdown("**② 현재 공정 상태**")
+        cur = st.selectbox("현재 몰드 주조 강종", grade_ids,
+                           format_func=lambda x: f"{x} ({GRADE_BY_ID[x].label})", key="g_cur")
+        prev_w = st.number_input("현재 몰드 직전 폭(mm)", 900, 1700, 1250, 50, key="g_pw")
+        queue = st.multiselect("대기열 강종", grade_ids, default=[grade], key="g_q")
+        util = st.slider("현재 몰드 가동률(%)", 0, 100, 86, key="g_u")
+
+    rec = guide.recommend(grade, int(width), int(prev_w), cur, list(queue), util, urgent)
+
+    st.markdown("### 🧭 추천")
+    st.success(f"**이동 방향(정련 경로)**: {rec.route_label}  ·  **주조 조치**: {rec.action}")
+    m = st.columns(3)
+    m[0].metric("권장 정련 경로", rec.route_label)
+    m[1].metric("전환 셋업(예상)", f"{rec.setup_min:.0f} 분",
+                delta="없음" if rec.setup_min == 0 else "발생",
+                delta_color="off" if rec.setup_min == 0 else "inverse")
+    m[2].metric("예상 대기(병목)", f"{rec.est_wait_min:.0f} 분", delta_color="off")
+
+    st.markdown("**근거 (설명 가능)**")
+    for r in rec.rationale:
+        st.write("- " + r)
+
+    if rec.alternatives:
+        st.markdown("**대안 비교**")
+        st.dataframe(pd.DataFrame(rec.alternatives), use_container_width=True, hide_index=True)
+
+    st.info("최종 결정은 현업(오퍼레이터)이 합니다 — 시스템은 근거·예상 영향을 제시하는 "
+            "**human-in-the-loop** 방식입니다. 실제 제약(납기·폭·턴디시 수명 등)과 목적 가중치가 "
+            "확정되면 이 규칙을 **최적화(CP-SAT)** 로 대체해 다수 슬래브를 동시에 배치·시퀀싱합니다.")
+
+
+# ══════════════════════════════════════════════════════════════
 #  메인
 # ══════════════════════════════════════════════════════════════
 sim = get_sim()
@@ -536,15 +585,17 @@ with st.sidebar:
 st.markdown("###### COLORED PETRI NET · 연주 부문")
 st.title("슬래브 물류 · 스케줄 최적화")
 
-tab_data, tab_cause, tab_whatif, tab_sim, tab_opt = st.tabs(
-    ["📥 과거 데이터 (가시화·병목)", "🔎 원인 분석", "📈 개선 what-if", "🔄 물류 시뮬레이션",
-     "🧩 제약·최적화 예시 (인터뷰용)"])
+tab_data, tab_cause, tab_whatif, tab_guide, tab_sim, tab_opt = st.tabs(
+    ["📥 과거 데이터 (가시화·병목)", "🔎 원인 분석", "📈 개선 what-if", "🧭 라우팅 가이던스",
+     "🔄 물류 시뮬레이션", "🧩 제약·최적화 예시 (인터뷰용)"])
 with tab_data:
     render_data()
 with tab_cause:
     render_cause()
 with tab_whatif:
     render_whatif()
+with tab_guide:
+    render_guidance()
 with tab_sim:
     render_simulation(sim)
 with tab_opt:
