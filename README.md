@@ -11,7 +11,22 @@ Colored Petri Net의 **Place(설비·버퍼) / Transition(공정 이벤트) / To
 
 ---
 
-## 빠른 시작
+## 파이썬(Streamlit) 버전 — 마이그레이션 진행 중
+
+최적화 알고리즘·제약 규칙을 반영하기 위해 **파이썬 기반 웹(Streamlit)** 으로
+이전 중입니다. 기존 HTML 프로토타입은 참조용으로 유지됩니다.
+
+```bash
+pip install -r requirements.txt
+streamlit run streamlit_app.py        # → http://localhost:8501
+```
+
+- 코어 모델: `src/model.py` (강종/Place/경로), 엔진: `src/simulation.py`
+- 최적화/제약 정의 양식: [docs/OPTIMIZATION_SPEC.md](docs/OPTIMIZATION_SPEC.md)
+  (현업 인터뷰 후 작성 → `src/optimization.py`로 반영 예정)
+- 배포: GitHub Pages(정적)로는 불가 → **Streamlit Community Cloud** 등 서버 호스팅 필요
+
+## 빠른 시작 (기존 HTML 프로토타입)
 
 별도의 빌드·설치 과정이 없습니다. 외부 의존성(폰트·라이브러리·네트워크)이 전혀 없어
 파일 하나만으로 동작합니다.
