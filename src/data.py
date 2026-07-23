@@ -203,6 +203,12 @@ def throughput(df: pd.DataFrame, freq: str = "1h") -> pd.DataFrame:
     return pd.DataFrame({"time": tp.index, "completed": tp.values})
 
 
+def grade_mix(df: pd.DataFrame) -> pd.DataFrame:
+    """강종 믹스 — heat 기준 강종 분포."""
+    m = df.drop_duplicates("heat_no").groupby("grade").size().reset_index(name="count")
+    return m.sort_values("count", ascending=False).reset_index(drop=True)
+
+
 # ══════════════════════════════════════════════════════════════
 #  원인 분석 (C: Diagnostic)
 # ══════════════════════════════════════════════════════════════

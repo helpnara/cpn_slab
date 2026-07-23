@@ -338,6 +338,33 @@ def render_data() -> None:
                              plot_bgcolor=TRANSPARENT, font_color="#e6edf3")
         st.plotly_chart(fig_lg, use_container_width=True)
 
+    st.subheader("처리량 · 리드타임 분포 · 강종 믹스")
+    cc = st.columns(3)
+    with cc[0]:
+        st.caption("시간당 완료 heat (처리량)")
+        tp = datamod.throughput(df, "1h")
+        fig_tp = go.Figure(go.Bar(x=tp["time"], y=tp["completed"], marker_color=ACCENT))
+        fig_tp.update_layout(height=240, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor=TRANSPARENT,
+                             plot_bgcolor=TRANSPARENT, font_color="#e6edf3", yaxis_title="완료")
+        st.plotly_chart(fig_tp, use_container_width=True)
+    with cc[1]:
+        st.caption("리드타임 분포 (시간)")
+        fig_h = go.Figure(go.Histogram(x=lead["lead_min"] / 60, nbinsx=20, marker_color=STEEL))
+        fig_h.update_layout(height=240, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor=TRANSPARENT,
+                            plot_bgcolor=TRANSPARENT, font_color="#e6edf3",
+                            xaxis_title="리드타임(h)", yaxis_title="heat 수")
+        st.plotly_chart(fig_h, use_container_width=True)
+    with cc[2]:
+        st.caption("강종 믹스 (heat 수)")
+        mix = datamod.grade_mix(df)
+        fig_m = go.Figure(go.Bar(
+            x=mix["grade"], y=mix["count"],
+            marker_color=[GRADE_BY_ID[g].color if g in GRADE_BY_ID else STEEL for g in mix["grade"]],
+            text=mix["count"], textposition="outside"))
+        fig_m.update_layout(height=240, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor=TRANSPARENT,
+                            plot_bgcolor=TRANSPARENT, font_color="#e6edf3")
+        st.plotly_chart(fig_m, use_container_width=True)
+
     with st.expander("데이터 미리보기 (상위 20행)"):
         st.dataframe(df.head(20), use_container_width=True, hide_index=True)
 
@@ -594,15 +621,39 @@ def sim_controls(s: Simulation) -> None:
         s.reset()
 
 
-# (아이콘·라벨, 캡션(단계), 페이지 제목, 렌더 함수)  — 렌더가 None이면 시뮬레이션
+# (아이콘·라벨, 캡션(단계), 페이지 제목, 렌더 함수, 페이지 안내)  — 렌더 None이면 시뮬레이션
 PAGES = [
-    ("📥 과거 데이터", "A·B 가시화 / 병목", "과거 데이터 · 물류 가시화 & 병목 탐지", render_data),
-    ("🔎 원인 분석", "C 진단", "원인 분석 · 병목 진단", render_cause),
-    ("📈 개선 what-if", "D 개선", "개선 what-if · 캐스트 시퀀싱 효과", render_whatif),
-    ("🧭 라우팅 가이던스", "E 의사결정 지원", "라우팅 가이던스 · 의사결정 지원", render_guidance),
-    ("🔄 시뮬레이션", "모델 실험", "물류 시뮬레이션", None),
-    ("🧩 최적화 예시", "인터뷰용", "제약·최적화 예시 (인터뷰용)", render_optimization),
+    ("📥 과거 데이터", "A·B 가시화 / 병목", "과거 데이터 · 물류 가시화 & 병목 탐지", render_data,
+     "과거 이벤트 로그로 물류를 가시화하고 병목 후보를 찾습니다(A·B). 샘플 또는 CSV 업로드 → "
+     "데이터 감사 → KPI·병목 후보(평균 체류시간이 긴 공정)·처리량·분포·믹스."),
+    ("🔎 원인 분석", "C 진단", "원인 분석 · 병목 진단", render_cause,
+     "병목이 **왜** 생기는지 진단합니다(C). 체류시간 분해(대기/처리/블로킹), 설비 가동률(포화=병목), "
+     "사유코드·강종 전환 상관, 시간대별 병목 이동 히트맵."),
+    ("📈 개선 what-if", "D 개선", "개선 what-if · 캐스트 시퀀싱 효과", render_whatif,
+     "주조 **순서만** 바꿔 개선 효과를 정량화합니다(D). 도착순(기준) vs 윈도우/전체 강종 그룹핑 비교 — "
+     "전환·셋업·병목·리드타임 트레이드오프."),
+    ("🧭 라우팅 가이던스", "E 의사결정 지원", "라우팅 가이던스 · 의사결정 지원", render_guidance,
+     "신규 슬래브의 **이동 방향·주조 조치**를 추천합니다(E). 규칙 기반·설명 가능(HITL) — 최종 결정은 현업. "
+     "실제 제약 확정 후 CP-SAT로 승급 예정."),
+    ("🔄 시뮬레이션", "모델 실험", "물류 시뮬레이션", None,
+     "체류시간·용량 기반 결정적 모델로 흐름을 실험합니다. **사이드바**에서 투입·파라미터·실행을 조작하세요."),
+    ("🧩 최적화 예시", "인터뷰용", "제약·최적화 예시 (인터뷰용)", render_optimization,
+     "인터뷰 설명용 캐스트 시퀀싱 최적화 **예시**입니다. 값·규칙은 가정이며, 인터뷰로 실제 제약·목적을 확정합니다."),
 ]
+
+GLOSSARY_MD = (
+    "- **WIP**: 공정 중 재공(진행 중 슬래브) 수\n"
+    "- **리드타임**: heat 투입~야드 입고까지 총 소요\n"
+    "- **체류시간(dwell)**: 한 공정에서의 대기+처리 시간\n"
+    "- **대기(큐)**: 설비가 빌 때까지 버퍼에서 기다린 시간\n"
+    "- **블로킹**: 처리를 마쳤으나 하류가 막혀 반출 못한 시간\n"
+    "- **starving**: 상류 공급 부족으로 설비가 노는 것\n"
+    "- **가동률**: 설비가 실제 처리한 시간 비율(포화=병목)\n"
+    "- **셋업**: 강종/폭 전환 시 추가되는 처리시간\n"
+    "- **coffin rule**: 연속 주조에서 슬래브 폭은 매끄러운 감소를 선호\n"
+    "- **Guard**: 강종별 필수 경로 분기(SUS→LF, API→RH, SS→직행)\n"
+    "- **Place / Transition**: CPN 요소 — 설비·버퍼 / 공정 이벤트"
+)
 
 with st.sidebar:
     st.markdown("## 🏭 슬래브 물류·스케줄")
@@ -616,9 +667,13 @@ with st.sidebar:
     else:
         st.caption("**분석 흐름**\n\nA 데이터 → B 가시화 → C 진단 → D 개선 → E 가이던스")
         st.caption("문서: `README.md` · `docs/DEV_PLAN.md`")
+    with st.expander("📖 용어 사전"):
+        st.markdown(GLOSSARY_MD)
 
 st.markdown("###### COLORED PETRI NET · 연주 부문")
 st.title(page[2])
+with st.expander("ℹ️ 이 페이지 안내"):
+    st.markdown(page[4])
 
 if page[3] is None:
     render_simulation(sim)
