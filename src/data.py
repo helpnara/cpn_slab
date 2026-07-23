@@ -268,6 +268,18 @@ def reason_impact(df: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values("delay_min", ascending=False).reset_index(drop=True) if len(out) else out
 
 
+def bottleneck_heatmap(df: pd.DataFrame, freq: str = "1h") -> pd.DataFrame:
+    """시간대(행 방향은 공정) × 시간버킷 평균 체류시간 피벗 — 병목이 시간대별로
+    어떻게 이동하는지 히트맵용. 값 단위: 분."""
+    d = with_dwell(df).copy()
+    d["bucket"] = d["enter_time"].dt.floor(freq)
+    piv = d.pivot_table(index="stage", columns="bucket", values="dwell_min", aggfunc="mean")
+    order = [s.id for s in STAGES if s.id in piv.index]
+    piv = piv.reindex(order)
+    piv.index = [STAGE_BY_ID[s].label for s in piv.index]
+    return piv
+
+
 def transition_effect(df: pd.DataFrame, stage: str = "mold") -> Optional[pd.DataFrame]:
     """특정 공정에서 강종 전환 여부에 따른 평균 처리시간 비교(세트업 영향)."""
     d = decompose(df)

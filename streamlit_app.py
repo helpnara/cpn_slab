@@ -428,9 +428,21 @@ def render_cause() -> None:
                             plot_bgcolor=TRANSPARENT, font_color="#e6edf3", yaxis_title="평균 처리시간(분)")
         st.plotly_chart(fig_t, use_container_width=True)
 
+    st.subheader("⑤ 시간대별 병목 이동 (평균 체류시간 히트맵)")
+    hm = datamod.bottleneck_heatmap(df, "1h")
+    fig_hm = go.Figure(go.Heatmap(
+        z=hm.values, x=[t.strftime("%m/%d %H시") for t in hm.columns], y=list(hm.index),
+        colorscale="OrRd", colorbar=dict(title="분")))
+    fig_hm.update_layout(height=330, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor=TRANSPARENT,
+                         plot_bgcolor=TRANSPARENT, font_color="#e6edf3",
+                         yaxis=dict(autorange="reversed"))
+    st.plotly_chart(fig_hm, use_container_width=True)
+    st.caption("행=공정, 열=시간대. 진할수록 체류시간↑ — 몰드·턴디시가 시간 내내 병목으로 유지되는지, "
+               "특정 시간대에 다른 공정으로 옮겨가는지 확인.")
+
     st.success("💡 개선 시사점: 병목(몰드)의 최대 지연 원인은 **강종 전환 셋업**입니다. "
                "같은 강종을 묶어 주조 순서를 정하면(캐스트 시퀀싱) 전환을 줄여 병목을 완화할 수 있습니다 "
-               "→ **‘제약·최적화 예시’ 탭**에서 그 효과를 확인하세요.")
+               "→ **‘제약·최적화 예시’ 페이지**에서 그 효과를 확인하세요.")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -544,59 +556,71 @@ def render_guidance() -> None:
 # ══════════════════════════════════════════════════════════════
 sim = get_sim()
 
-with st.sidebar:
-    st.header("⚙️ 파라미터")
-    sim.cfg.auto_arrival = st.checkbox("자동 투입 사용", value=sim.cfg.auto_arrival)
-    sim.cfg.arrival_prob = st.slider("자동 투입 확률", 0.0, 1.0, sim.cfg.arrival_prob, 0.05)
-    sim.cfg.max_wip = st.slider("최대 WIP", 1, 12, sim.cfg.max_wip)
-    sim.cfg.bottleneck_threshold = st.slider("병목 경보 임계", 1, 6, sim.cfg.bottleneck_threshold)
 
+def sim_controls(s: Simulation) -> None:
+    """시뮬레이션 제어 (시뮬레이션 페이지일 때만 사이드바에 표시)."""
+    st.subheader("⚙️ 파라미터")
+    s.cfg.auto_arrival = st.checkbox("자동 투입 사용", value=s.cfg.auto_arrival)
+    s.cfg.arrival_prob = st.slider("자동 투입 확률", 0.0, 1.0, s.cfg.arrival_prob, 0.05)
+    s.cfg.max_wip = st.slider("최대 WIP", 1, 12, s.cfg.max_wip)
+    s.cfg.bottleneck_threshold = st.slider("병목 경보 임계", 1, 6, s.cfg.bottleneck_threshold)
     st.divider()
-    st.header("🎯 슬래브 투입")
-    grade_id = st.selectbox(
-        "강종", [g.id for g in GRADES],
-        format_func=lambda gid: f"{gid} · {GRADE_BY_ID[gid].label} ({GRADE_BY_ID[gid].route})")
-    thick = st.number_input("두께(mm, 0=랜덤)", min_value=0, max_value=400, value=0, step=10)
-    qty = st.number_input("수량", min_value=1, max_value=20, value=1)
+    st.subheader("🎯 슬래브 투입")
+    grade_id = st.selectbox("강종", [g.id for g in GRADES],
+                            format_func=lambda gid: f"{gid} · {GRADE_BY_ID[gid].label} ({GRADE_BY_ID[gid].route})")
+    thick = st.number_input("두께(mm, 0=랜덤)", 0, 400, 0, 10)
+    qty = st.number_input("수량", 1, 20, 1)
     a1, a2 = st.columns(2)
     if a1.button("＋ 투입 예약", use_container_width=True):
-        sim.enqueue_manual(grade_id, thick or None, int(qty))
+        s.enqueue_manual(grade_id, thick or None, int(qty))
     if a2.button("대기열 비우기", use_container_width=True):
-        sim.clear_queue()
-    if sim.manual_queue:
+        s.clear_queue()
+    if s.manual_queue:
         counts: dict[str, int] = {}
-        for g, t in sim.manual_queue:
+        for g, t in s.manual_queue:
             counts[f"{g} {t or '랜덤'}"] = counts.get(f"{g} {t or '랜덤'}", 0) + 1
         st.caption("대기열: " + ", ".join(f"{k}×{v}" for k, v in counts.items()))
     else:
         st.caption("투입 대기열 비어 있음")
-
     st.divider()
-    st.header("▶ 실행")
-    n_steps = st.number_input("실행 스텝 수", min_value=1, max_value=200, value=20)
+    st.subheader("▶ 실행")
+    n_steps = st.number_input("실행 스텝 수", 1, 200, 20)
     r1, r2, r3 = st.columns(3)
     if r1.button(f"▶ {int(n_steps)}스텝", use_container_width=True):
-        sim.run(int(n_steps))
+        s.run(int(n_steps))
     if r2.button("＋1", use_container_width=True):
-        sim.step()
+        s.step()
     if r3.button("↺ 초기화", use_container_width=True):
-        sim.reset()
+        s.reset()
+
+
+# (아이콘·라벨, 캡션(단계), 페이지 제목, 렌더 함수)  — 렌더가 None이면 시뮬레이션
+PAGES = [
+    ("📥 과거 데이터", "A·B 가시화 / 병목", "과거 데이터 · 물류 가시화 & 병목 탐지", render_data),
+    ("🔎 원인 분석", "C 진단", "원인 분석 · 병목 진단", render_cause),
+    ("📈 개선 what-if", "D 개선", "개선 what-if · 캐스트 시퀀싱 효과", render_whatif),
+    ("🧭 라우팅 가이던스", "E 의사결정 지원", "라우팅 가이던스 · 의사결정 지원", render_guidance),
+    ("🔄 시뮬레이션", "모델 실험", "물류 시뮬레이션", None),
+    ("🧩 최적화 예시", "인터뷰용", "제약·최적화 예시 (인터뷰용)", render_optimization),
+]
+
+with st.sidebar:
+    st.markdown("## 🏭 슬래브 물류·스케줄")
+    st.caption("연주 부문 · Colored Petri Net")
+    choice = st.radio("메뉴", [p[0] for p in PAGES], captions=[p[1] for p in PAGES],
+                      label_visibility="collapsed")
+    page = next(p for p in PAGES if p[0] == choice)
+    st.divider()
+    if page[3] is None:  # 시뮬레이션 페이지
+        sim_controls(sim)
+    else:
+        st.caption("**분석 흐름**\n\nA 데이터 → B 가시화 → C 진단 → D 개선 → E 가이던스")
+        st.caption("문서: `README.md` · `docs/DEV_PLAN.md`")
 
 st.markdown("###### COLORED PETRI NET · 연주 부문")
-st.title("슬래브 물류 · 스케줄 최적화")
+st.title(page[2])
 
-tab_data, tab_cause, tab_whatif, tab_guide, tab_sim, tab_opt = st.tabs(
-    ["📥 과거 데이터 (가시화·병목)", "🔎 원인 분석", "📈 개선 what-if", "🧭 라우팅 가이던스",
-     "🔄 물류 시뮬레이션", "🧩 제약·최적화 예시 (인터뷰용)"])
-with tab_data:
-    render_data()
-with tab_cause:
-    render_cause()
-with tab_whatif:
-    render_whatif()
-with tab_guide:
-    render_guidance()
-with tab_sim:
+if page[3] is None:
     render_simulation(sim)
-with tab_opt:
-    render_optimization()
+else:
+    page[3]()
