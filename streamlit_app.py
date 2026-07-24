@@ -30,6 +30,8 @@ st.set_page_config(page_title="CPN 슬래브 물류 — 연주 부문", page_ico
 ACCENT, ACCENT2, HOT = "#e05c1a", "#f0a05a", "#ff6b35"
 SURFACE, BORDER, MUTED, STEEL = "#161b22", "#30363d", "#8b949e", "#4a9eff"
 TRANSPARENT = "rgba(0,0,0,0)"
+# 색맹 대응: 강종을 색 + 패턴으로 이중 인코딩
+GRADE_PATTERN = {"SUS304": "/", "SS400": ".", "API5L": "x"}
 
 
 def cap_label(cap: float) -> str:
@@ -141,7 +143,9 @@ def render_simulation(sim: Simulation) -> None:
         } for g in GRADES]
         ldf = pd.DataFrame(lead_rows)
         fig_lead = go.Figure(go.Bar(
-            x=ldf["평균"], y=ldf["강종"], orientation="h", marker_color=ldf["color"],
+            x=ldf["평균"], y=ldf["강종"], orientation="h",
+            marker=dict(color=ldf["color"],
+                        pattern_shape=[GRADE_PATTERN.get(g, "") for g in ldf["강종"]]),
             text=[f"{v:.1f}" if n else "—" for v, n in zip(ldf["평균"], ldf["완료수"])],
             textposition="outside"))
         fig_lead.update_layout(height=240, margin=dict(l=0, r=0, t=10, b=0),
@@ -296,10 +300,13 @@ def render_data() -> None:
         return
 
     lead = datamod.lead_times(df)
+    trend = datamod.period_trend(df)
+    lead_delta = (f"{trend['late'] - trend['early']:+.1f} h · 후반 vs 전반" if trend else None)
     m = st.columns(4)
     m[0].metric("heat 수", f"{df['heat_no'].nunique()}")
     m[1].metric("이벤트(행)", f"{len(df)}")
-    m[2].metric("평균 리드타임", f"{lead['lead_min'].mean() / 60:.1f} h")
+    m[2].metric("평균 리드타임", f"{lead['lead_min'].mean() / 60:.1f} h",
+                delta=lead_delta, delta_color="inverse")
     span_h = (df["exit_time"].max() - df["enter_time"].min()).total_seconds() / 3600
     m[3].metric("관측 기간", f"{span_h:.0f} h")
 
@@ -332,7 +339,8 @@ def render_data() -> None:
         lg = lead.groupby("grade")["lead_min"].mean().reset_index()
         fig_lg = go.Figure(go.Bar(
             x=lg["grade"], y=lg["lead_min"] / 60,
-            marker_color=[GRADE_BY_ID[g].color if g in GRADE_BY_ID else STEEL for g in lg["grade"]],
+            marker=dict(color=[GRADE_BY_ID[g].color if g in GRADE_BY_ID else STEEL for g in lg["grade"]],
+                        pattern_shape=[GRADE_PATTERN.get(g, "") for g in lg["grade"]]),
             text=[f"{v / 60:.1f}h" for v in lg["lead_min"]], textposition="outside"))
         fig_lg.update_layout(height=260, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor=TRANSPARENT,
                              plot_bgcolor=TRANSPARENT, font_color="#e6edf3")
@@ -359,11 +367,25 @@ def render_data() -> None:
         mix = datamod.grade_mix(df)
         fig_m = go.Figure(go.Bar(
             x=mix["grade"], y=mix["count"],
-            marker_color=[GRADE_BY_ID[g].color if g in GRADE_BY_ID else STEEL for g in mix["grade"]],
+            marker=dict(color=[GRADE_BY_ID[g].color if g in GRADE_BY_ID else STEEL for g in mix["grade"]],
+                        pattern_shape=[GRADE_PATTERN.get(g, "") for g in mix["grade"]]),
             text=mix["count"], textposition="outside"))
         fig_m.update_layout(height=240, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor=TRANSPARENT,
                             plot_bgcolor=TRANSPARENT, font_color="#e6edf3")
         st.plotly_chart(fig_m, use_container_width=True)
+
+    st.subheader("설비 가동률 추이 (시간대별)")
+    ut = datamod.utilization_timeline(df, "2h")
+    fig_ut = go.Figure()
+    for label, sub in ut.groupby("label"):
+        emph = label == "몰드"
+        fig_ut.add_scatter(x=sub["bucket"], y=sub["util"], mode="lines", name=label,
+                           line=dict(width=3 if emph else 1.4, color=HOT if emph else None))
+    fig_ut.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor=TRANSPARENT,
+                         plot_bgcolor=TRANSPARENT, font_color="#e6edf3", yaxis_title="가동률(%)",
+                         legend=dict(orientation="h", y=1.15))
+    st.plotly_chart(fig_ut, use_container_width=True)
+    st.caption("몰드(굵은 선)가 시간 내내 높은 가동률(병목). 낮은 공정은 병목에 막혀 유휴(starving).")
 
     with st.expander("데이터 미리보기 (상위 20행)"):
         st.dataframe(df.head(20), use_container_width=True, hide_index=True)
@@ -466,6 +488,21 @@ def render_cause() -> None:
     st.plotly_chart(fig_hm, use_container_width=True)
     st.caption("행=공정, 열=시간대. 진할수록 체류시간↑ — 몰드·턴디시가 시간 내내 병목으로 유지되는지, "
                "특정 시간대에 다른 공정으로 옮겨가는지 확인.")
+
+    st.subheader("⑥ 설비 상태 분해 — 가동 / 블로킹 / 유휴(스타빙)")
+    es = datamod.equipment_states(df)
+    fig_es = go.Figure()
+    fig_es.add_bar(y=es["label"], x=es["가동"], name="가동", orientation="h", marker_color=STEEL)
+    fig_es.add_bar(y=es["label"], x=es["블로킹"], name="블로킹", orientation="h", marker_color=HOT)
+    fig_es.add_bar(y=es["label"], x=es["유휴/스타빙"], name="유휴/스타빙", orientation="h",
+                   marker_color=MUTED)
+    fig_es.update_layout(barmode="stack", height=300, margin=dict(l=0, r=0, t=10, b=0),
+                         paper_bgcolor=TRANSPARENT, plot_bgcolor=TRANSPARENT, font_color="#e6edf3",
+                         yaxis=dict(autorange="reversed"), xaxis_title="관측기간×용량 대비 %",
+                         legend=dict(orientation="h", y=1.15))
+    st.plotly_chart(fig_es, use_container_width=True)
+    st.caption("몰드=가동 93%(포화=병목). 턴디시=블로킹 비중 큼(몰드 대기). 나머지=유휴가 커 "
+               "병목에 막혀 놀고 있음(starving) — 병목 해소 전엔 상류 증설 효과가 작음을 시사.")
 
     st.success("💡 개선 시사점: 병목(몰드)의 최대 지연 원인은 **강종 전환 셋업**입니다. "
                "같은 강종을 묶어 주조 순서를 정하면(캐스트 시퀀싱) 전환을 줄여 병목을 완화할 수 있습니다 "
@@ -655,6 +692,15 @@ GLOSSARY_MD = (
     "- **Place / Transition**: CPN 요소 — 설비·버퍼 / 공정 이벤트"
 )
 
+TIPS = {
+    "📥 과거 데이터": "병목 후보에서 가장 긴 공정, 처리량·WIP 추이의 급변 구간, 가동률 추이에서 몰드 선을 보세요.",
+    "🔎 원인 분석": "가동률 100% 공정(병목)과 블로킹 비중이 큰 상류 공정을 연결하고, 히트맵에서 병목이 이동하는지 보세요.",
+    "📈 개선 what-if": "윈도우 크기를 바꿔 전환↓과 리드타임 개선이 함께 되는 지점을 찾고, 전체 그룹핑의 부작용과 비교하세요.",
+    "🧭 라우팅 가이던스": "현재 몰드 강종·대기열·납기 임박을 바꿔가며 추천(즉시/묶기)과 근거가 어떻게 달라지는지 보세요.",
+    "🔄 시뮬레이션": "속도를 올리고 파라미터를 바꿔 병목 경보가 언제 뜨는지, 어느 Place가 포화되는지 관찰하세요.",
+    "🧩 최적화 예시": "제약을 켜고 끄며 폭 프로파일(coffin)과 비용 변화를 확인하세요.",
+}
+
 with st.sidebar:
     st.markdown("## 🏭 슬래브 물류·스케줄")
     st.caption("연주 부문 · Colored Petri Net")
@@ -674,6 +720,7 @@ st.markdown("###### COLORED PETRI NET · 연주 부문")
 st.title(page[2])
 with st.expander("ℹ️ 이 페이지 안내"):
     st.markdown(page[4])
+    st.markdown(f"**무엇을 볼까:** {TIPS.get(choice, '')}")
 
 if page[3] is None:
     render_simulation(sim)
