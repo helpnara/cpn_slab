@@ -11,20 +11,44 @@ Colored Petri Net의 **Place(설비·버퍼) / Transition(공정 이벤트) / To
 
 ---
 
-## 파이썬(Streamlit) 버전 — 마이그레이션 진행 중
+## 파이썬(Streamlit) 앱 — 분석 파이프라인
 
-최적화 알고리즘·제약 규칙을 반영하기 위해 **파이썬 기반 웹(Streamlit)** 으로
-이전 중입니다. 기존 HTML 프로토타입은 참조용으로 유지됩니다.
+최적화 알고리즘·제약 규칙을 반영하기 위해 **파이썬 기반 웹(Streamlit)** 으로 확장했습니다.
+가시화 → 진단 → 개선 → 가이던스로 이어지는 분석 파이프라인을 사이드바 네비게이터로
+제공합니다. (기존 HTML 프로토타입은 `legacy` 참조용으로 유지 예정)
 
 ```bash
 pip install -r requirements.txt
 streamlit run streamlit_app.py        # → http://localhost:8501
 ```
 
-- 코어 모델: `src/model.py` (강종/Place/경로), 엔진: `src/simulation.py`
-- 최적화/제약 정의 양식: [docs/OPTIMIZATION_SPEC.md](docs/OPTIMIZATION_SPEC.md)
-  (현업 인터뷰 후 작성 → `src/optimization.py`로 반영 예정)
-- 배포: GitHub Pages(정적)로는 불가 → **Streamlit Community Cloud** 등 서버 호스팅 필요
+![과거 데이터 페이지](docs/img/streamlit_data.png)
+![원인 분석 페이지](docs/img/streamlit_cause.png)
+
+### 페이지 구성 (분석 성숙도 A→E)
+
+| 페이지 | 단계 | 내용 |
+|--------|------|------|
+| 📥 과거 데이터 | A·B 가시화/병목 | 이벤트 로그 로드·감사 → KPI·병목 후보·처리량·분포·믹스·가동률 추이 |
+| 🔎 원인 분석 | C 진단 | 체류 분해(대기/처리/블로킹)·가동률·사유코드·강종 전환·시간대 히트맵·설비 상태 |
+| 📈 개선 what-if | D 개선 | 주조 순서 재배치(윈도우/전체 그룹핑) 효과 정량화 |
+| 🧭 라우팅 가이던스 | E 의사결정 지원 | 신규 슬래브 이동 방향·조치 추천(규칙 기반·설명 가능) |
+| 🔄 시뮬레이션 | 모델 실험 | 체류시간·용량 기반 결정적 엔진 |
+| 🧩 최적화 예시 | 인터뷰용 | 캐스트 시퀀싱 최적화 예시(값은 가정) |
+
+### 코드 구조
+
+- `src/model.py` 강종/Place/경로 · `src/simulation.py` 시뮬레이션 엔진
+- `src/data.py` 이벤트 로그 스키마·로더·지표(A~C) · `src/whatif.py` 개선 비교(D)
+- `src/guidance.py` 라우팅 추천(E) · `src/optimization.py` 최적화 예시
+- 데이터 요청서: [docs/DATA_REQUEST.md](docs/DATA_REQUEST.md) · 최적화 정의 양식:
+  [docs/OPTIMIZATION_SPEC.md](docs/OPTIMIZATION_SPEC.md) · 개발 계획·TODO:
+  [docs/DEV_PLAN.md](docs/DEV_PLAN.md)
+
+### 배포
+
+- **Streamlit Community Cloud** (repo `main` · `streamlit_app.py`) — GitHub Pages(정적)로는 불가.
+- 인터뷰로 제약이 확정되면 `src/optimization.py`를 OR-Tools CP-SAT로 승급(DEV_PLAN §6).
 
 ## 빠른 시작 (기존 HTML 프로토타입)
 

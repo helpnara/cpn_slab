@@ -286,6 +286,57 @@ def bottleneck_heatmap(df: pd.DataFrame, freq: str = "1h") -> pd.DataFrame:
     return piv
 
 
+def utilization_timeline(df: pd.DataFrame, freq: str = "2h") -> pd.DataFrame:
+    """유한 용량 공정의 시간대별 가동률(%) 롱포맷 (bucket, label, util)."""
+    d = decompose(df).copy()
+    d["bucket"] = d["start_time"].dt.floor(freq)
+    bucket_min = pd.Timedelta(freq).total_seconds() / 60
+    rows = []
+    for s in STAGES:
+        if s.cap == float("inf"):
+            continue
+        sub = d[d["stage"] == s.id]
+        for bkt, busy in sub.groupby("bucket")["proc_min"].sum().items():
+            rows.append({"bucket": bkt, "label": s.label,
+                         "util": min(busy / (bucket_min * s.cap) * 100, 100.0)})
+    return pd.DataFrame(rows)
+
+
+def equipment_states(df: pd.DataFrame) -> pd.DataFrame:
+    """설비 시간 상태 분해(%) — 가동/블로킹/유휴(스타빙). 관측기간×용량 기준."""
+    d = decompose(df)
+    span_min = (df["exit_time"].max() - df["enter_time"].min()).total_seconds() / 60
+    rows = []
+    for s in STAGES:
+        if s.cap == float("inf"):
+            continue
+        sub = d[d["stage"] == s.id]
+        if sub.empty or span_min <= 0:
+            continue
+        avail = span_min * s.cap
+        busy = sub["proc_min"].sum()
+        blocked = sub["block_min"].sum()
+        idle = max(avail - busy - blocked, 0.0)
+        rows.append({"stage": s.id, "label": s.label,
+                     "가동": busy / avail * 100, "블로킹": blocked / avail * 100,
+                     "유휴/스타빙": idle / avail * 100})
+    out = pd.DataFrame(rows)
+    return out.sort_values("stage", key=_stage_order).reset_index(drop=True) if len(out) else out
+
+
+def period_trend(df: pd.DataFrame) -> Optional[dict]:
+    """관측 구간을 전·후반으로 나눠 평균 리드타임 추세(시간) 반환."""
+    lead = lead_times(df).set_index("heat_no")
+    t0 = df.sort_values("enter_time").groupby("heat_no")["enter_time"].first()
+    lead["t0"] = t0
+    lead = lead.dropna(subset=["t0"]).sort_values("t0")
+    n = len(lead)
+    if n < 4:
+        return None
+    return {"early": lead.iloc[:n // 2]["lead_min"].mean() / 60,
+            "late": lead.iloc[n // 2:]["lead_min"].mean() / 60}
+
+
 def transition_effect(df: pd.DataFrame, stage: str = "mold") -> Optional[pd.DataFrame]:
     """특정 공정에서 강종 전환 여부에 따른 평균 처리시간 비교(세트업 영향)."""
     d = decompose(df)
