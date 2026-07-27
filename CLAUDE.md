@@ -16,6 +16,7 @@
 - [docs/DEV_PLAN.md](docs/DEV_PLAN.md) — 개발 방향 타당성 검토 · 단계별 TODO(가시화→병목→원인→개선→가이던스)
 - [docs/OPTIMIZATION_SPEC.md](docs/OPTIMIZATION_SPEC.md) — 최적화 문제 정의(현업 인터뷰 양식)
 - [docs/DATA_REQUEST.md](docs/DATA_REQUEST.md) — 과거 물류 데이터 요청서(현업·IT 전달용)
+- [docs/INTERVIEW_GUIDE.md](docs/INTERVIEW_GUIDE.md) — 현업 인터뷰 진행 가이드·체크리스트 (+ `docs/interview_deck.pptx` 슬라이드)
 
 ## 작업 규칙
 
